@@ -1,0 +1,134 @@
+{
+  "version": 1,
+  "description": "Single source of truth for the in-memory mock Cosmos DB. Both the Python and Java runners interpret this file, so mock behavior cannot drift between SDKs. Values AND branching rules live here; runners only provide a tiny interpreter + state store.",
+
+  "ru_charges": {
+    "create": 5.0,
+    "read": 1.0,
+    "replace": 5.0,
+    "upsert": 5.0,
+    "delete": 5.0,
+    "query_base": 2.0,
+    "query_per_row": 0.1
+  },
+
+  "status_codes": {
+    "created": 201,
+    "ok": 200,
+    "no_content": 204,
+    "conflict": 409,
+    "not_found": 404
+  },
+
+  "metadata_counters": ["get_database_account", "read_collection", "read_pk_ranges"],
+
+  "operations": {
+    "create_client": [
+      { "effect": "set_connection" },
+      { "effect": "incr_metadata", "counter": "get_database_account" },
+      { "return": { "ok": true, "status": "ok" } }
+    ],
+
+    "create_database": [
+      { "guard": ["db_exists", "if_not_exists"],
+        "return": { "ok": true, "status": "ok", "body": { "id": "{db}" } } },
+      { "guard": ["db_exists"],
+        "return": { "ok": false, "status": "conflict", "error_code": "Conflict",
+                    "message": "Database '{db}' already exists" } },
+      { "effect": "put_database" },
+      { "return": { "ok": true, "status": "created", "body": { "id": "{db}" } } }
+    ],
+
+    "create_container": [
+      { "guard": ["db_missing"],
+        "return": { "ok": false, "status": "not_found", "error_code": "NotFound",
+                    "message": "Database '{db}' not found" } },
+      { "guard": ["container_exists", "if_not_exists"],
+        "return": { "ok": true, "status": "ok", "body": { "id": "{container}" } } },
+      { "guard": ["container_exists"],
+        "return": { "ok": false, "status": "conflict", "error_code": "Conflict",
+                    "message": "Container '{container}' already exists" } },
+      { "effect": "put_container" },
+      { "return": { "ok": true, "status": "created",
+                    "body": { "id": "{container}", "partitionKey": "{pk_path}" } } }
+    ],
+
+    "create_item": [
+      { "guard": ["container_missing"],
+        "return": { "ok": false, "status": "not_found", "error_code": "NotFound",
+                    "message": "Container not found" } },
+      { "effect": "touch_collection" },
+      { "effect": "assign_id" },
+      { "guard": ["item_exists"],
+        "return": { "ok": false, "status": "conflict", "error_code": "Conflict",
+                    "message": "Item with id+pk already exists", "charge": "read" } },
+      { "effect": "put_item" },
+      { "return": { "ok": true, "status": "created", "body": "item", "charge": "create" } }
+    ],
+
+    "read_item": [
+      { "guard": ["container_missing"],
+        "return": { "ok": false, "status": "not_found", "error_code": "NotFound",
+                    "message": "Container not found" } },
+      { "effect": "touch_collection" },
+      { "guard": ["item_missing"],
+        "return": { "ok": false, "status": "not_found", "error_code": "NotFound",
+                    "message": "Item not found", "charge": "read" } },
+      { "return": { "ok": true, "status": "ok", "body": "item", "charge": "read" } }
+    ],
+
+    "replace_item": [
+      { "guard": ["container_missing"],
+        "return": { "ok": false, "status": "not_found", "error_code": "NotFound",
+                    "message": "Container not found" } },
+      { "effect": "touch_collection" },
+      { "guard": ["item_missing"],
+        "return": { "ok": false, "status": "not_found", "error_code": "NotFound",
+                    "message": "Item not found", "charge": "read" } },
+      { "effect": "put_item" },
+      { "return": { "ok": true, "status": "ok", "body": "item", "charge": "replace" } }
+    ],
+
+    "upsert_item": [
+      { "guard": ["container_missing"],
+        "return": { "ok": false, "status": "not_found", "error_code": "NotFound",
+                    "message": "Container not found" } },
+      { "effect": "touch_collection" },
+      { "effect": "assign_id" },
+      { "effect": "put_item" },
+      { "guard": ["existed"],
+        "return": { "ok": true, "status": "ok", "body": "item", "charge": "upsert" } },
+      { "return": { "ok": true, "status": "created", "body": "item", "charge": "upsert" } }
+    ],
+
+    "delete_item": [
+      { "guard": ["container_missing"],
+        "return": { "ok": false, "status": "not_found", "error_code": "NotFound",
+                    "message": "Container not found" } },
+      { "effect": "touch_collection" },
+      { "guard": ["item_missing"],
+        "return": { "ok": false, "status": "not_found", "error_code": "NotFound",
+                    "message": "Item not found", "charge": "read" } },
+      { "effect": "remove_item" },
+      { "return": { "ok": true, "status": "no_content", "charge": "delete" } }
+    ],
+
+    "query_items": [
+      { "guard": ["container_missing"],
+        "return": { "ok": false, "status": "not_found", "error_code": "NotFound",
+                    "message": "Container not found" } },
+      { "effect": "touch_collection" },
+      { "effect": "touch_pk_ranges_if_cross" },
+      { "effect": "query_filter" },
+      { "return": { "ok": true, "status": "ok", "body": "items", "charge": "query" } }
+    ],
+
+    "delete_database": [
+      { "guard": ["db_missing"],
+        "return": { "ok": false, "status": "not_found", "error_code": "NotFound",
+                    "message": "Database not found" } },
+      { "effect": "remove_database" },
+      { "return": { "ok": true, "status": "no_content" } }
+    ]
+  }
+}

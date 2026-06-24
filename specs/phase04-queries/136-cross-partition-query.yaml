@@ -1,0 +1,47 @@
+id: "136"
+phase: 4
+section: "4.1"
+title: "Cross-partition query (fan-out) with lazy PKRange fetch"
+description: |
+  A cross-partition query aggregates results from all partitions and triggers a
+  lazy ReadPartitionKeyRanges fetch on first execution.
+tags: [query, cross-partition, fan-out, pkrange]
+backends: [mock]
+
+fixture:
+  database: "auto"
+  container:
+    id: "orders"
+    partition_key: "/customerId"
+
+steps:
+  - id: seed1
+    action: create_item
+    params:
+      item: { id: "o1", customerId: "cust-1", status: "active", total: 10 }
+    expect:
+      - { type: ok }
+  - id: seed2
+    action: create_item
+    params:
+      item: { id: "o2", customerId: "cust-2", status: "active", total: 20 }
+    expect:
+      - { type: ok }
+  - id: seed3
+    action: create_item
+    params:
+      item: { id: "o3", customerId: "cust-3", status: "inactive", total: 30 }
+    expect:
+      - { type: ok }
+
+  - id: query_active
+    action: query_items
+    params:
+      query: "SELECT * FROM c WHERE c.status = @s"
+      parameters:
+        - { name: "@s", value: "active" }
+      cross_partition: true
+    expect:
+      - { type: ok }
+      - { type: item_count, name: two_active_orders, value: 2 }
+      - { type: metric_equals, name: pkrange_fetched_on_first_query, metric: metadata_calls.read_pk_ranges, value: 1 }

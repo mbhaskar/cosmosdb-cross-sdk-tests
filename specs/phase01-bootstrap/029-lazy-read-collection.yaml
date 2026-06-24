@@ -1,0 +1,35 @@
+id: "29"
+phase: 1
+section: "1.4"
+title: "First operation triggers lazy ReadCollection"
+description: |
+  Container metadata (ReadCollection) is fetched lazily on the first data-plane
+  operation to a container, then served from cache for subsequent operations.
+tags: [bootstrap, lazy-init, cache, metadata]
+backends: [mock]
+
+fixture:
+  database: "auto"
+  container:
+    id: "items"
+    partition_key: "/pk"
+
+steps:
+  - id: assert_not_fetched_at_init
+    action: read_item
+    params:
+      id: "does-not-exist"
+      partition_key: "warm"
+    expect:
+      # The first op both triggers and counts the ReadCollection call.
+      - { type: error_status, value: 404 }
+      - { type: metric_equals, name: read_collection_on_first_op, metric: metadata_calls.read_collection, value: 1 }
+
+  - id: second_op
+    action: read_item
+    params:
+      id: "still-missing"
+      partition_key: "warm"
+    expect:
+      - { type: error_status, value: 404 }
+      - { type: metric_equals, name: read_collection_cached, metric: metadata_calls.read_collection, value: 1 }

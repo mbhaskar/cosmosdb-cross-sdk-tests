@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>CosmosDB Cross-SDK Test Matrix</title>
+<style>
+  :root {
+    --bg: #0f1420; --panel: #18202f; --border: #27324a; --fg: #e6ebf5;
+    --muted: #8b97ad; --accent: #4c8dff;
+    --pass: #2ea043; --fail: #f85149; --error: #d29922; --skip: #6e7681; --run: #4c8dff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 -apple-system, Segoe UI, Roboto, sans-serif;
+         background: var(--bg); color: var(--fg); }
+  header { display: flex; align-items: center; gap: 16px; padding: 12px 20px;
+           border-bottom: 1px solid var(--border); background: var(--panel); position: sticky; top: 0; z-index: 5; }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .spacer { flex: 1; }
+  .config { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; padding: 10px 20px;
+            border-bottom: 1px solid var(--border); background: #131a27; }
+  .config label { color: var(--muted); font-size: 12px; display: flex; gap: 6px; align-items: center; }
+  select, button { background: #1f2940; color: var(--fg); border: 1px solid var(--border);
+                   border-radius: 6px; padding: 6px 10px; font-size: 13px; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .wrap { padding: 16px 20px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; }
+  th { background: #131a27; position: sticky; top: 0; font-size: 12px; color: var(--muted); }
+  td.scenario { max-width: 460px; }
+  td.scenario .id { color: var(--muted); font-variant-numeric: tabular-nums; margin-right: 8px; }
+  td.phase { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .cell { display: flex; align-items: center; gap: 8px; }
+  .badge { display: inline-flex; align-items: center; justify-content: center;
+           min-width: 58px; padding: 3px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .badge.pass { background: rgba(46,160,67,.18); color: var(--pass); }
+  .badge.fail { background: rgba(248,81,73,.18); color: var(--fail); }
+  .badge.error { background: rgba(210,153,34,.18); color: var(--error); }
+  .badge.skip { background: rgba(110,118,129,.18); color: var(--skip); }
+  .badge.running { background: rgba(76,141,255,.18); color: var(--run); }
+  .badge.none { background: #1c2536; color: var(--muted); }
+  .cell button { padding: 3px 8px; font-size: 12px; }
+  .summary { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 12px; }
+  .sumcard { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; }
+  .sumcard b { font-size: 15px; }
+  .pill { font-size: 11px; padding: 1px 6px; border-radius: 4px; margin-left: 4px; }
+  /* detail drawer */
+  #drawer { position: fixed; top: 0; right: 0; width: 540px; max-width: 92vw; height: 100%;
+            background: var(--panel); border-left: 1px solid var(--border); transform: translateX(100%);
+            transition: transform .2s ease; overflow: auto; z-index: 20; }
+  #drawer.open { transform: translateX(0); }
+  #drawer .dhead { display: flex; align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--border); }
+  #drawer .dhead h2 { font-size: 15px; margin: 0; flex: 1; }
+  #drawer .body { padding: 16px 18px; }
+  .kv { display: grid; grid-template-columns: 140px 1fr; gap: 4px 12px; margin-bottom: 14px; }
+  .kv span:nth-child(odd) { color: var(--muted); }
+  .assert { padding: 6px 10px; border-radius: 6px; margin-bottom: 6px; background: #131a27; }
+  .assert.pass { border-left: 3px solid var(--pass); }
+  .assert.fail { border-left: 3px solid var(--fail); }
+  pre { background: #0c1018; border: 1px solid var(--border); border-radius: 6px; padding: 10px;
+        overflow: auto; font-size: 12px; max-height: 280px; }
+  h3 { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin: 18px 0 8px; }
+  .diag { background: #131a27; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 6px; padding: 6px 10px; }
+  .diag summary { cursor: pointer; font-size: 13px; }
+  .diag pre { margin-top: 8px; max-height: 320px; }
+  pre.json { white-space: pre; tab-size: 2; }
+  .j-key { color: #7aa2f7; }
+  .j-str { color: #9ece6a; }
+  .j-num { color: #ff9e64; }
+  .j-bool { color: #bb9af7; }
+  .j-null { color: #f7768e; }
+  .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+           background: var(--panel); border: 1px solid var(--border); padding: 8px 16px; border-radius: 8px; opacity: 0; transition: opacity .2s; }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🌌 CosmosDB Cross-SDK Test Matrix</h1>
+  <span class="spacer"></span>
+  <span id="runinfo" style="color:var(--muted);font-size:12px"></span>
+  <button class="primary" id="runAll">▶ Run All</button>
+</header>
+
+<div class="config">
+  <label>Backend
+    <select id="backend"><option value="mock">mock</option><option value="emulator">emulator</option><option value="live">live</option></select>
+  </label>
+  <label>Connection
+    <select id="mode"><option value="direct">direct</option><option value="gateway">gateway</option></select>
+  </label>
+  <label id="endpointWrap" style="display:none">Endpoint
+    <input id="endpoint" type="text" placeholder="https://host:port/" style="min-width:220px" />
+  </label>
+  <label id="keyWrap" style="display:none">Key
+    <input id="key" type="password" placeholder="(or use env / default.yaml)" style="min-width:180px" />
+  </label>
+  <label>SDKs <span id="sdklist" style="color:var(--fg)"></span></label>
+</div>
+<script>
+  (function(){
+    const be = document.getElementById('backend');
+    const mode = document.getElementById('mode');
+    const ep = document.getElementById('endpoint');
+    const key = document.getElementById('key');
+    const LS = 'cosmosMatrixConfig';
+
+    // Restore previously entered config from this browser.
+    try {
+      const saved = JSON.parse(localStorage.getItem(LS) || '{}');
+      if (saved.backend) be.value = saved.backend;
+      if (saved.mode) mode.value = saved.mode;
+      if (saved.endpoint) ep.value = saved.endpoint;
+      if (saved.key) key.value = saved.key;
+    } catch (e) { /* ignore corrupt storage */ }
+
+    function persist() {
+      localStorage.setItem(LS, JSON.stringify({
+        backend: be.value, mode: mode.value, endpoint: ep.value, key: key.value
+      }));
+    }
+    function sync(){
+      const live = be.value !== 'mock';
+      document.getElementById('endpointWrap').style.display = live ? '' : 'none';
+      document.getElementById('keyWrap').style.display = live ? '' : 'none';
+    }
+    [be, mode, ep, key].forEach(el => el.addEventListener('input', persist));
+    be.addEventListener('change', sync);
+    sync();
+  })();
+</script>
+
+<div class="wrap">
+  <div class="summary" id="summary"></div>
+  <table id="matrix">
+    <thead><tr id="head"></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+</div>
+
+<div id="drawer">
+  <div class="dhead"><h2 id="dtitle">Result</h2><button onclick="closeDrawer()">✕</button></div>
+  <div class="body" id="dbody"></div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const STATUS_ICON = { pass: '✅', fail: '❌', error: '⚠️', skip: '—', running: '⏳' };
+let scenarios = [], sdks = [], results = {}, pollTimer = null;
+
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 1800);
+}
+
+async function init() {
+  scenarios = await (await fetch('/api/scenarios')).json();
+  sdks = (await (await fetch('/api/sdks')).json());
+  document.getElementById('sdklist').textContent =
+    sdks.map(s => `${s.name}${s.available ? '' : ' (unbuilt)'}`).join(', ');
+  renderHead(); renderRows();
+}
+
+function activeSdks() { return sdks; }
+
+function renderHead() {
+  const head = document.getElementById('head');
+  head.innerHTML = '<th>Phase</th><th>Scenario</th>' +
+    activeSdks().map(s => `<th>${s.name} <button onclick="runColumn('${s.name}')" ${s.available?'':'disabled'}>▶ col</button></th>`).join('');
+}
+
+function renderRows() {
+  const rows = document.getElementById('rows');
+  rows.innerHTML = scenarios.map(sc => {
+    const cells = activeSdks().map(s => {
+      const r = results[`${sc.id}|${s.name}`];
+      const st = r ? r.status : 'none';
+      const label = r ? (STATUS_ICON[st] || st) + ' ' + st : '·';
+      const extra = r && r.duration_ms != null && st !== 'none' ? `<span style="color:var(--muted);font-size:11px">${r.duration_ms}ms</span>` : '';
+      return `<td><div class="cell">
+        <span class="badge ${st}" onclick='showDetail("${sc.id}","${s.name}")' style="cursor:pointer">${label}</span>
+        ${extra}
+        <button onclick="runCell('${sc.id}','${s.name}')" ${s.available?'':'disabled'}>▶</button>
+      </div></td>`;
+    }).join('');
+    return `<tr>
+      <td class="phase">P${sc.phase ?? '?'} · ${sc.section ?? ''}</td>
+      <td class="scenario"><span class="id">#${sc.id}</span>${sc.title}</td>
+      ${cells}</tr>`;
+  }).join('');
+}
+
+function reqBody(scenarioIds, sdkNames) {
+  const cfg = { backend: document.getElementById('backend').value, connection_mode: document.getElementById('mode').value };
+  if (cfg.backend !== 'mock') {
+    const ep = document.getElementById('endpoint').value.trim();
+    const key = document.getElementById('key').value.trim();
+    if (ep) cfg.endpoint = ep;
+    if (key) cfg.key = key;
+  }
+  return {
+    scenarios: scenarioIds,
+    sdks: sdkNames.map(n => ({ name: n, version: (sdks.find(s=>s.name===n)?.versions[0]) || 'latest' })),
+    config: cfg
+  };
+}
+
+async function startRun(scenarioIds, sdkNames) {
+  for (const sid of scenarioIds) for (const n of sdkNames) {
+    results[`${sid}|${n}`] = { status: 'running' };
+  }
+  renderRows();
+  const resp = await fetch('/api/runs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(reqBody(scenarioIds, sdkNames))
+  });
+  const res = await resp.json();
+  if (!resp.ok) {
+    for (const sid of scenarioIds) for (const n of sdkNames) {
+      results[`${sid}|${n}`] = { status: 'error' };
+    }
+    renderRows();
+    const msg = Array.isArray(res.detail) ? JSON.stringify(res.detail) : (res.detail || 'run failed');
+    toast('⚠ ' + msg);
+    return;
+  }
+  toast('Run started: ' + res.run_id);
+  pollRun(res.run_id);
+}
+
+function pollRun(runId) {
+  if (pollTimer) clearInterval(pollTimer);
+  document.getElementById('runinfo').textContent = 'Run ' + runId + ' …';
+  pollTimer = setInterval(async () => {
+    const run = await (await fetch('/api/runs/' + runId)).json();
+    for (const r of run.results) results[`${r.scenario_id}|${r.sdk}`] = r;
+    renderRows(); renderSummary(run);
+    if (run.status === 'completed') {
+      clearInterval(pollTimer); pollTimer = null;
+      document.getElementById('runinfo').textContent = 'Run ' + runId + ' ✓';
+    }
+  }, 700);
+}
+
+function renderSummary(run) {
+  if (!run.summary || !run.summary.by_sdk) return;
+  document.getElementById('summary').innerHTML = Object.entries(run.summary.by_sdk).map(([sdk, b]) =>
+    `<div class="sumcard"><b>${sdk}</b>
+      <span class="pill" style="background:rgba(46,160,67,.2);color:var(--pass)">✅ ${b.pass||0}</span>
+      <span class="pill" style="background:rgba(248,81,73,.2);color:var(--fail)">❌ ${b.fail||0}</span>
+      <span class="pill" style="background:rgba(210,153,34,.2);color:var(--error)">⚠️ ${b.error||0}</span>
+      <span class="pill" style="background:rgba(110,118,129,.2);color:var(--skip)">— ${b.skip||0}</span>
+    </div>`).join('') + renderDiff();
+}
+
+function renderDiff() {
+  // Highlight scenarios where SDKs disagree.
+  const names = activeSdks().map(s => s.name);
+  if (names.length < 2) return '';
+  const diffs = scenarios.filter(sc => {
+    const sts = names.map(n => (results[`${sc.id}|${n}`]||{}).status).filter(Boolean);
+    return sts.length === names.length && new Set(sts).size > 1;
+  });
+  if (!diffs.length) return '';
+  return `<div class="sumcard" style="border-color:var(--error)"><b>⚖ Divergences</b> ` +
+    diffs.map(d => `#${d.id}`).join(', ') + `</div>`;
+}
+
+function runCell(sid, sdk) { startRun([sid], [sdk]); }
+function runColumn(sdk) { startRun(scenarios.map(s => s.id), [sdk]); }
+document.getElementById('runAll').onclick = () =>
+  startRun(scenarios.map(s => s.id), activeSdks().filter(s=>s.available).map(s => s.name));
+
+function showDetail(sid, sdk) {
+  const r = results[`${sid}|${sdk}`];
+  if (!r || r.status === 'running' || r.status === 'none') return;
+  const sc = scenarios.find(s => s.id === sid);
+  document.getElementById('dtitle').textContent = `#${sid} ${sc.title} · ${sdk}`;
+  const asserts = (r.assertions||[]).map(a =>
+    `<div class="assert ${a.passed?'pass':'fail'}">${a.passed?'✓':'✗'} <b>${a.name}</b>
+      <span style="color:var(--muted)">${a.step?'('+a.step+')':''} ${a.detail||''}</span></div>`).join('') || '<i>none</i>';
+  document.getElementById('dbody').innerHTML = `
+    <div class="kv">
+      <span>Status</span><span>${STATUS_ICON[r.status]||''} ${r.status}</span>
+      <span>SDK version</span><span>${r.sdk_version||''}</span>
+      <span>Backend</span><span>${r.backend||''}</span>
+      <span>Duration</span><span>${r.duration_ms} ms</span>
+    </div>
+    ${r.error ? `<div class="assert fail">${r.error}</div>` : ''}
+    <h3>Assertions</h3>${asserts}
+    <h3>Metrics</h3><pre>${JSON.stringify(r.metrics||{}, null, 2)}</pre>
+    <h3>Diagnostics</h3>${renderDiagnostics(r.diagnostics)}
+    <h3>Logs</h3><pre>${(r.logs||[]).join('\n')}</pre>`;
+  document.getElementById('drawer').classList.add('open');
+}
+function closeDrawer() { document.getElementById('drawer').classList.remove('open'); }
+function escapeHtml(s) {
+  return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+}
+function renderDiagnostics(diags) {
+  if (!diags || !diags.length) {
+    return `<div style="color:var(--muted)"><i>No SDK diagnostics (mock backend, or none captured).</i></div>`;
+  }
+  return diags.map(d => `
+    <details class="diag">
+      <summary><b>${escapeHtml(d.step||d.action||'')}</b>
+        <span style="color:var(--muted)">${escapeHtml(d.action||'')} · ${d.status_code ?? ''}</span></summary>
+      <pre class="json">${formatJson(d.text||'')}</pre>
+    </details>`).join('');
+}
+function formatJson(text) {
+  let pretty = text;
+  try {
+    pretty = JSON.stringify(JSON.parse(text), null, 2);
+  } catch (e) { /* not JSON — show raw */ }
+  return syntaxHighlight(pretty);
+}
+function syntaxHighlight(json) {
+  json = escapeHtml(json);
+  return json.replace(
+    /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
+    (match) => {
+      let cls = 'j-num';
+      if (/^"/.test(match)) {
+        cls = /:$/.test(match) ? 'j-key' : 'j-str';
+      } else if (/true|false/.test(match)) {
+        cls = 'j-bool';
+      } else if (/null/.test(match)) {
+        cls = 'j-null';
+      }
+      return `<span class="${cls}">${match}</span>`;
+    });
+}
+
+init();
+</script>
+</body>
+</html>

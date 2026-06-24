@@ -1,0 +1,18 @@
+id: "7"
+phase: 1
+section: "1.1"
+title: "Create client in Direct connection mode"
+description: |
+  Client is created requesting Direct connection mode. The configured mode is
+  reflected in client metadata/metrics.
+tags: [bootstrap, connection-mode, direct]
+backends: [mock, emulator, live]
+
+steps:
+  - id: create
+    action: create_client
+    params:
+      connection_mode: "direct"
+    expect:
+      - { type: ok }
+      - { type: metric_equals, name: direct_mode_selected, metric: connection_mode, value: "direct" }

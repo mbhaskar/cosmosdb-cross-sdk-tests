@@ -1,0 +1,119 @@
+name: Nightly (emulator)
+
+# Runs the full matrix against the Linux Cosmos DB emulator on a schedule, plus
+# on-demand. The emulator runs as a service container; because service
+# containers start before the job regardless of inputs, the emulator tier lives
+# in its own workflow rather than as a `backend` option on the fast mock gate.
+on:
+  schedule:
+    - cron: "0 7 * * *" # 07:00 UTC daily
+  workflow_dispatch:
+    inputs:
+      languages:
+        description: "Which SDK runner(s) to execute"
+        type: choice
+        options: [both, python, java]
+        default: both
+      divergence_check:
+        description: "Fail when SDKs disagree (only applies when languages=both)"
+        type: boolean
+        default: true
+
+jobs:
+  emulator-matrix:
+    runs-on: ubuntu-latest
+    env:
+      LANGUAGES: ${{ github.event.inputs.languages || 'both' }}
+      DIVERGENCE: ${{ github.event.inputs.divergence_check || 'true' }}
+    services:
+      cosmos:
+        image: mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:latest
+        ports:
+          - 8081:8081
+          - 10251:10251
+          - 10252:10252
+          - 10253:10253
+          - 10254:10254
+        env:
+          AZURE_COSMOS_EMULATOR_PARTITION_COUNT: "3"
+          AZURE_COSMOS_EMULATOR_ENABLE_DATA_PERSISTENCE: "false"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml
+          pip install -r harness/python/requirements.txt
+
+      - name: Set up Java
+        if: ${{ env.LANGUAGES != 'python' }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - name: Build Java runner
+        if: ${{ env.LANGUAGES != 'python' }}
+        run: cd harness/java && mvn -q -DskipTests package
+
+      # The emulator ships a self-signed cert and takes a while to become
+      # healthy. Poll its endpoint, then trust the cert for both SDKs.
+      - name: Wait for emulator + trust certificate
+        run: |
+          set -e
+          echo "Waiting for emulator to accept connections..."
+          for i in $(seq 1 60); do
+            if curl -ksf https://localhost:8081/_explorer/emulator.pem -o /tmp/cosmos.crt; then
+              echo "Emulator is up."
+              break
+            fi
+            sleep 5
+          done
+          test -s /tmp/cosmos.crt || { echo "Emulator never became ready"; exit 1; }
+          # Trust the cert for the JVM (Java SDK) and the OS store (Python SDK).
+          sudo cp /tmp/cosmos.crt /usr/local/share/ca-certificates/cosmos.crt
+          sudo update-ca-certificates
+          KEYTOOL="$JAVA_HOME/bin/keytool"
+          sudo "$KEYTOOL" -importcert -noprompt -trustcacerts -alias cosmos-emulator \
+            -file /tmp/cosmos.crt -keystore "$JAVA_HOME/lib/security/cacerts" \
+            -storepass changeit || true
+
+      - name: Run scenario matrix (emulator)
+        env:
+          # Well-known public emulator endpoint + key (also in config/default.yaml).
+          REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+          SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+        run: |
+          python scripts/run-matrix.py \
+            --backend emulator \
+            --sdks "$LANGUAGES" \
+            --out results/
+
+      - name: Compare SDKs (divergence gate)
+        if: ${{ env.LANGUAGES == 'both' }}
+        run: |
+          FLAG=""
+          if [ "$DIVERGENCE" = "true" ]; then FLAG="--fail-on-divergence"; fi
+          python scripts/compare.py results/ -o report.md $FLAG
+
+      - name: Single-SDK report
+        if: ${{ env.LANGUAGES != 'both' }}
+        run: python scripts/compare.py results/ -o report.md
+
+      - name: Upload results + report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: emulator-matrix-${{ env.LANGUAGES }}
+          path: |
+            results/
+            report.md
+          if-no-files-found: warn

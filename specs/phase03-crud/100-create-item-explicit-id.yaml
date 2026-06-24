@@ -1,0 +1,38 @@
+id: "100"
+phase: 3
+section: "3.1"
+title: "Create item with explicit ID and partition key; conflict on duplicate"
+description: |
+  Creating an item with an explicit id stores it in the correct partition.
+  Re-creating the same id+pk returns a 409 Conflict.
+tags: [crud, create, conflict]
+backends: [mock, emulator, live]
+
+fixture:
+  database: "auto"
+  container:
+    id: "orders"
+    partition_key: "/customerId"
+
+steps:
+  - id: create
+    action: create_item
+    params:
+      item:
+        id: "order-1"
+        customerId: "cust-1"
+        total: 42
+    expect:
+      - { type: ok }
+      - { type: status_code, value: 201 }
+      - { type: field_equals, path: item.id, value: "order-1" }
+
+  - id: duplicate
+    action: create_item
+    params:
+      item:
+        id: "order-1"
+        customerId: "cust-1"
+        total: 99
+    expect:
+      - { type: error_status, name: conflict_on_duplicate, value: 409 }

@@ -1,0 +1,54 @@
+# Scenario spec format (MVP subset)
+#
+# A scenario is a YAML document with the following shape. Only the fields used
+# by the MVP runner are documented here; the format is intentionally a strict
+# subset of the full design in ARCHITECTURE.md so it can grow later.
+#
+# id:          string   - unique scenario id (matches plan.md numbering)
+# phase:       int      - phase number (1..16)
+# section:     string   - sub-section reference (e.g. "3.1")
+# title:       string   - short human-readable title
+# description: string   - optional long description
+# tags:        [string] - free-form tags for filtering
+# backends:    [string] - which backends this scenario can run on
+#                         (subset of: mock, emulator, live). Default: all.
+#
+# fixture:               - optional. When present the runner provisions an
+#                          isolated database (and container) before the steps
+#                          run and tears it down afterwards.
+#   database: "auto"     - "auto" generates a unique per-run db id
+#   container:
+#     id: "items"
+#     partition_key: "/pk"
+#
+# steps:                 - ordered list of operations.
+#   - id: <string>       - optional; result is stored under ctx.steps.<id>
+#     action: <string>   - one of the supported actions (see below)
+#     params: {...}      - action parameters (support ${...} substitution)
+#     expect: [...]      - assertions evaluated against this step's result
+#
+# Supported actions:
+#   create_client, create_database, create_container,
+#   create_item, read_item, replace_item, upsert_item, delete_item,
+#   query_items, delete_database
+#
+# Substitution variables available in params:
+#   ${run_id}                 - unique id for this run
+#   ${db}, ${container}       - fixture database / container ids
+#   ${connection_mode}        - configured connection mode
+#   ${uuid}, ${now}           - generated values
+#   ${steps.<id>.id}          - id of the item produced by a prior step
+#   ${steps.<id>.item.<field>}- field from a prior step's returned item
+#
+# Assertion types (in `expect`):
+#   { type: ok }                              - operation succeeded
+#   { type: error }                           - operation failed
+#   { type: status_code, value: 201 }         - exact HTTP status
+#   { type: error_status, value: 409 }        - failed with given status
+#   { type: item_count, value: 3 }            - query returned N items
+#   { type: count_gte, value: 1 }             - query returned >= N items
+#   { type: field_equals, path: item.total, value: 99 }
+#   { type: metric_equals, metric: metadata_calls.read_collection, value: 1 }
+#   { type: metric_zero, metric: metadata_calls.read_pk_ranges }
+#
+# Optional `name` on any assertion overrides the reported assertion name.

@@ -1,0 +1,43 @@
+id: "107"
+phase: 3
+section: "3.2"
+title: "Point read by ID + partition key; 404 when missing"
+description: |
+  A point read returns the stored document; reading a non-existent id returns
+  a NotFound (404) without crashing.
+tags: [crud, read, point-read]
+backends: [mock, emulator, live]
+
+fixture:
+  database: "auto"
+  container:
+    id: "orders"
+    partition_key: "/customerId"
+
+steps:
+  - id: seed
+    action: create_item
+    params:
+      item:
+        id: "order-1"
+        customerId: "cust-1"
+        total: 42
+    expect:
+      - { type: ok }
+
+  - id: read
+    action: read_item
+    params:
+      id: "order-1"
+      partition_key: "cust-1"
+    expect:
+      - { type: ok }
+      - { type: field_equals, path: item.total, value: 42 }
+
+  - id: read_missing
+    action: read_item
+    params:
+      id: "order-404"
+      partition_key: "cust-1"
+    expect:
+      - { type: error_status, name: not_found, value: 404 }

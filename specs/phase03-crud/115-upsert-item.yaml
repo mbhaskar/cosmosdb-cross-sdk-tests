@@ -1,0 +1,44 @@
+id: "115"
+phase: 3
+section: "3.4"
+title: "Upsert - insert path then replace path"
+description: |
+  Upserting a new id creates the item; upserting the same id updates it.
+tags: [crud, upsert]
+backends: [mock, emulator, live]
+
+fixture:
+  database: "auto"
+  container:
+    id: "orders"
+    partition_key: "/customerId"
+
+steps:
+  - id: insert
+    action: upsert_item
+    params:
+      item:
+        id: "order-1"
+        customerId: "cust-1"
+        total: 10
+    expect:
+      - { type: ok, name: upsert_insert }
+
+  - id: update
+    action: upsert_item
+    params:
+      item:
+        id: "order-1"
+        customerId: "cust-1"
+        total: 20
+    expect:
+      - { type: ok, name: upsert_replace }
+      - { type: field_equals, path: item.total, value: 20 }
+
+  - id: verify_single
+    action: query_items
+    params:
+      query: "SELECT * FROM c"
+      partition_key: "cust-1"
+    expect:
+      - { type: item_count, name: no_duplicate_created, value: 1 }

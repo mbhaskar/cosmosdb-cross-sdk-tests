@@ -1,0 +1,18 @@
+id: "1"
+phase: 1
+section: "1.1"
+title: "Create client with master key auth"
+description: |
+  Validates that a client can be constructed with master-key (primary key)
+  credentials and is immediately usable.
+tags: [bootstrap, auth, master-key]
+backends: [mock, emulator, live]
+
+steps:
+  - id: create
+    action: create_client
+    params:
+      connection_mode: "${connection_mode}"
+    expect:
+      - { type: ok, name: client_created }
+      - { type: metric_equals, name: account_fetched_eagerly, metric: metadata_calls.get_database_account, value: 1 }
