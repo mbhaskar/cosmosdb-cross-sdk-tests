@@ -235,12 +235,18 @@ and run the matrix against that build instead:
   for Java, `harness/python/.venv-local` for Python). The catalog of versions /
   sources lives in `config/default.yaml` under the `sdks` block.
 - **In CI** — `sdk-from-source.yml` (Actions → Run workflow) takes `language`,
-  `sdk_repo`, `sdk_ref`, and `backend`. It checks out the Azure SDK monorepo at
-  the chosen ref, builds `azure-cosmos` (Java → into `.m2`, then a variant jar
-  with `-Dazure.cosmos.version=<branch-version>`; Python → into a dedicated
-  venv), and runs the matrix with `--source local`. Source builds only make
-  sense against a real backend (`emulator` / `live`) — the `mock` backend never
-  loads the SDK.
+  `sdk_repo`, `sdk_ref`, `sdk_ref_custom`, and `backend`. **`sdk_ref` is a
+  dropdown of active Cosmos branches from `Azure/azure-sdk-for-java`** (GitHub
+  caps a workflow dropdown at a static, short list, so it can't show all ~1000
+  branches live); for any other branch/tag/commit — or a `python` repo — type it
+  into **`sdk_ref_custom`**, which overrides the dropdown. The effective ref is
+  validated against the chosen repo (`git ls-remote`) before the build, so a typo
+  fails fast with close matches. The workflow then checks out the Azure SDK
+  monorepo at that ref, builds `azure-cosmos` (Java → into `.m2`, then a variant
+  jar with `-Dazure.cosmos.version=<branch-version>`; Python → into a dedicated
+  venv), and runs the matrix with `--source local`. Source builds only make sense
+  against a real backend (`emulator` / `live`) — the `mock` backend never loads
+  the SDK.
 
 ### Validating the pipeline on GitHub
 

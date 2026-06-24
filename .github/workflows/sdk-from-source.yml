@@ -19,9 +19,25 @@ on:
         type: string
         default: "Azure/azure-sdk-for-java"
       sdk_ref:
-        description: "Branch, tag, or commit SHA of the SDK to build"
+        description: "Cosmos branch from Azure/azure-sdk-for-java (ignored if 'sdk_ref_custom' is set)"
+        type: choice
+        default: main
+        options:
+          - main
+          - feature/cosmos/java-21-support
+          - feature/cosmos/query-binary-encoding
+          - feature/cosmos/rntbd-fixes
+          - AzCosmos_Http2ParentChannelExceptionHandler
+          - cosmos_fabric_native_integration_testing
+          - nalutripician/cosmos-metadata-hedging
+          - release/fabianm/azure-cosmos_4.68.0
+          - release/kuthapar/azure-cosmos_4.71.0-beta.1
+          - hotfix/fabianm/azure-cosmos_4.66.2-beta.1
+      sdk_ref_custom:
+        description: "Any other branch / tag / commit SHA (overrides the dropdown; required for non-java repos)"
         type: string
-        required: true
+        required: false
+        default: ""
       backend:
         description: "Backend to run against (emulator or live)"
         type: choice
@@ -34,9 +50,32 @@ jobs:
     env:
       LANGUAGE: ${{ github.event.inputs.language }}
       SDK_REPO: ${{ github.event.inputs.sdk_repo }}
-      SDK_REF: ${{ github.event.inputs.sdk_ref }}
+      # Free-text "custom" wins over the curated dropdown when provided.
+      SDK_REF: ${{ github.event.inputs.sdk_ref_custom != '' && github.event.inputs.sdk_ref_custom || github.event.inputs.sdk_ref }}
       BACKEND: ${{ github.event.inputs.backend }}
     steps:
+      - name: Validate SDK ref exists in repo
+        run: |
+          echo "Resolving '$SDK_REF' in https://github.com/$SDK_REPO ..."
+          match=$(git ls-remote "https://github.com/$SDK_REPO" \
+            "refs/heads/$SDK_REF" "refs/tags/$SDK_REF" | head -1)
+          if [ -z "$match" ]; then
+            # Maybe it's a full commit SHA (not advertised as a ref).
+            if printf '%s' "$SDK_REF" | grep -qiE '^[0-9a-f]{7,40}$'; then
+              echo "::notice::'$SDK_REF' looks like a commit SHA; will let checkout resolve it."
+            else
+              echo "::error::Ref '$SDK_REF' was not found as a branch or tag in $SDK_REPO."
+              echo "Closest branch matches:"
+              git ls-remote --heads "https://github.com/$SDK_REPO" \
+                | awk '{print $2}' | sed 's#refs/heads/##' \
+                | grep -iF "$(printf '%s' "$SDK_REF" | cut -c1-6)" | head -15 \
+                || echo "  (none)"
+              exit 1
+            fi
+          else
+            echo "Found: $match"
+          fi
+
       - name: Checkout harness
         uses: actions/checkout@v4
         with:
