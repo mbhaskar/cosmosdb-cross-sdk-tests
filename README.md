@@ -190,6 +190,9 @@ python scripts/run-matrix.py --backend mock --sdks both --out results/
 # Just one language (divergence comparison is then moot):
 python scripts/run-matrix.py --backend mock --sdks python --out results/
 
+# Run against a locally-built SDK (a variant jar / venv built from an SDK branch):
+python scripts/run-matrix.py --backend emulator --sdks java --source local --out results/
+
 # Cross-SDK divergence gate (no-op when fewer than two SDKs are present):
 python scripts/compare.py results/ -o report.md --fail-on-divergence
 ```
@@ -200,6 +203,7 @@ python scripts/compare.py results/ -o report.md --fail-on-divergence
 | --- | --- | --- | --- |
 | `.github/workflows/ci.yml` | push / PR (auto) + manual | `mock` (default), `live` | The PR gate. Auto-runs **both** SDKs + divergence gate. |
 | `.github/workflows/nightly-emulator.yml` | nightly cron + manual | `emulator` | Spins up the Cosmos Linux emulator service container. |
+| `.github/workflows/sdk-from-source.yml` | manual | `emulator` / `live` | Builds the Cosmos SDK from a chosen **branch/ref** of an Azure SDK monorepo, then runs the matrix with `--source local`. |
 
 **Manual runs are parameterized** (Actions → Run workflow):
 
@@ -213,6 +217,30 @@ python scripts/compare.py results/ -o report.md --fail-on-divergence
   logs (the store redacts them).
 
 Both runs upload `results/*.json` + `report.md` as artifacts.
+
+### Testing an unreleased SDK branch (registry vs. local source)
+
+By default both runners consume **released** artifacts — Java from Maven Central
+(`${azure.cosmos.version}` in `harness/java/pom.xml`), Python from PyPI
+(`azure-cosmos`). To validate an unmerged SDK branch you can build it from source
+and run the matrix against that build instead:
+
+- **In the orchestrator UI** — each SDK has a version dropdown (the `SDKs` row).
+  It lists the published registry version plus a **local build** entry; the
+  selection is remembered in `localStorage`. The result drawer shows the
+  **Resolved SDK** version actually loaded at runtime, so you can confirm which
+  build ran.
+- **Headless** — `scripts/run-matrix.py --source local` points the dispatcher at
+  the locally-built artifacts (`harness/java/variants/local/cosmos-test-runner.jar`
+  for Java, `harness/python/.venv-local` for Python). The catalog of versions /
+  sources lives in `config/default.yaml` under the `sdks` block.
+- **In CI** — `sdk-from-source.yml` (Actions → Run workflow) takes `language`,
+  `sdk_repo`, `sdk_ref`, and `backend`. It checks out the Azure SDK monorepo at
+  the chosen ref, builds `azure-cosmos` (Java → into `.m2`, then a variant jar
+  with `-Dazure.cosmos.version=<branch-version>`; Python → into a dedicated
+  venv), and runs the matrix with `--source local`. Source builds only make
+  sense against a real backend (`emulator` / `live`) — the `mock` backend never
+  loads the SDK.
 
 ### Validating the pipeline on GitHub
 
@@ -246,7 +274,7 @@ harness/python/   Python runner (cosmos_test_runner)
 harness/java/     Java runner (Maven, shaded jar)
 scripts/          run-mvp.sh, run-matrix.py (CI), compare.py
 config/           default.yaml
-.github/workflows/ ci.yml, nightly-emulator.yml
+.github/workflows/ ci.yml, nightly-emulator.yml, sdk-from-source.yml
 ```
 
 ---

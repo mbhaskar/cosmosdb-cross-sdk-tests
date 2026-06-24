@@ -97,7 +97,7 @@
   <label id="keyWrap" style="display:none">Key
     <input id="key" type="password" placeholder="(or use env / default.yaml)" style="min-width:180px" />
   </label>
-  <label>SDKs <span id="sdklist" style="color:var(--fg)"></span></label>
+  <label>SDKs <span id="sdkpick" style="color:var(--fg)"></span></label>
 </div>
 <script>
   (function(){
@@ -159,9 +159,45 @@ function toast(msg) {
 async function init() {
   scenarios = await (await fetch('/api/scenarios')).json();
   sdks = (await (await fetch('/api/sdks')).json());
-  document.getElementById('sdklist').textContent =
-    sdks.map(s => `${s.name}${s.available ? '' : ' (unbuilt)'}`).join(', ');
+  renderSdkPicker();
   renderHead(); renderRows();
+}
+
+const SRC_BADGE = { published: 'Registry', local: 'Local build' };
+const SDK_LS = 'cosmosMatrixSdkSel';
+
+function renderSdkPicker() {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(SDK_LS) || '{}'); } catch (e) {}
+  const pick = document.getElementById('sdkpick');
+  pick.innerHTML = sdks.map(s => {
+    const opts = (s.versions || []).map((v, i) => {
+      const reg = s.name === 'python' ? 'PyPI' : 'Maven Central';
+      const badge = v.source === 'published' ? reg : (SRC_BADGE[v.source] || v.source);
+      const sel = saved[s.name] === i ? 'selected' : '';
+      return `<option value="${i}" ${v.available ? '' : 'disabled'} ${sel}>`
+        + `${v.label} · ${badge}${v.available ? '' : ' (unavailable)'}</option>`;
+    }).join('');
+    return `<span style="margin-right:10px"><b>${s.name}</b> `
+      + `<select id="ver-${s.name}" onchange="persistSdkSel()">${opts}</select></span>`;
+  }).join('');
+}
+
+function persistSdkSel() {
+  const sel = {};
+  for (const s of sdks) {
+    const el = document.getElementById('ver-' + s.name);
+    if (el) sel[s.name] = +el.value;
+  }
+  localStorage.setItem(SDK_LS, JSON.stringify(sel));
+}
+
+function selectedSdk(name) {
+  const s = sdks.find(x => x.name === name) || {};
+  const el = document.getElementById('ver-' + name);
+  const idx = el ? +el.value : 0;
+  const v = (s.versions || [])[idx] || { label: 'latest', source: 'published' };
+  return { version: v.label, source: v.source };
 }
 
 function activeSdks() { return sdks; }
@@ -203,7 +239,7 @@ function reqBody(scenarioIds, sdkNames) {
   }
   return {
     scenarios: scenarioIds,
-    sdks: sdkNames.map(n => ({ name: n, version: (sdks.find(s=>s.name===n)?.versions[0]) || 'latest' })),
+    sdks: sdkNames.map(n => { const sel = selectedSdk(n); return { name: n, version: sel.version, source: sel.source }; }),
     config: cfg
   };
 }
@@ -285,7 +321,8 @@ function showDetail(sid, sdk) {
   document.getElementById('dbody').innerHTML = `
     <div class="kv">
       <span>Status</span><span>${STATUS_ICON[r.status]||''} ${r.status}</span>
-      <span>SDK version</span><span>${r.sdk_version||''}</span>
+      <span>SDK version</span><span>${r.sdk_version||''}${r.sdk_source ? ` · ${r.sdk_source}` : ''}</span>
+      <span>Resolved SDK</span><span>${r.resolved_sdk_version || '<i style="color:var(--muted)">n/a</i>'}</span>
       <span>Backend</span><span>${r.backend||''}</span>
       <span>Duration</span><span>${r.duration_ms} ms</span>
     </div>

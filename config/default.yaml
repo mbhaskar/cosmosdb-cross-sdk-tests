@@ -19,6 +19,16 @@ live:
 
 sdks:
   python:
-    versions: ["4.9.0"]
+    versions:
+      - label: "4.9.0"
+        source: published      # from PyPI (pip)
+      - label: "local-source"
+        source: local          # built from an azure-sdk-for-python branch
+        venv: "harness/python/.venv-local"
   java:
-    versions: ["4.63.0"]
+    versions:
+      - label: "4.63.0"
+        source: published      # from Maven Central
+      - label: "local-source"
+        source: local          # built from an azure-sdk-for-java branch
+        jar: "harness/java/variants/local/cosmos-test-runner.jar"

@@ -37,6 +37,8 @@ public class Main {
         Map<String, Object> scenario = (Map<String, Object>) job.get("scenario");
         Map<String, Object> config = (Map<String, Object>) job.getOrDefault("config", new java.util.LinkedHashMap<>());
         String sdkVersion = String.valueOf(job.getOrDefault("sdk_version", "unknown"));
+        // Surface the requested SDK source (published|local) to the executor.
+        config.put("sdk_source", String.valueOf(job.getOrDefault("sdk_source", "published")));
 
         ScenarioExecutor executor = new ScenarioExecutor(
                 scenario, config, sdkVersion, line -> System.err.println(line));

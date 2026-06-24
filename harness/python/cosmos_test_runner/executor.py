@@ -20,6 +20,17 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+def _resolved_sdk_version():
+    """The actual azure-cosmos version installed in this interpreter (not the
+    label the caller passed). None when the SDK isn't installed (e.g. a
+    mock-only environment)."""
+    try:
+        from importlib import metadata
+        return metadata.version("azure-cosmos")
+    except Exception:
+        return None
+
+
 def _resolve(value: Any, ctx: Dict[str, Any]) -> Any:
     """Recursively substitute ${...} placeholders inside scenario params."""
     if isinstance(value, str):
@@ -134,6 +145,8 @@ class ScenarioRunner:
             "title": self.scenario.get("title"),
             "sdk": "python",
             "sdk_version": self.sdk_version,
+            "sdk_source": self.config.get("sdk_source", "published"),
+            "resolved_sdk_version": _resolved_sdk_version(),
             "backend": self.config.get("backend", "mock"),
             "status": status,
             "duration_ms": duration_ms,

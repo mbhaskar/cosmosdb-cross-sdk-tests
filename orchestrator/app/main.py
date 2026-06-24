@@ -44,6 +44,7 @@ _executor = ThreadPoolExecutor(max_workers=4)
 class SdkSel(BaseModel):
     name: str
     version: str = "latest"
+    source: str = "published"
 
 
 class RunConfig(BaseModel):
@@ -166,6 +167,7 @@ def _execute_run(run_id: str, scenario_ids: List[str], sdks: List[Dict], config:
         _executor.submit(
             runner_dispatcher.dispatch,
             sdk["name"], scenario, job_config, sdk.get("version", "latest"),
+            sdk.get("source", "published"),
         ): (scenario, sdk)
         for scenario, sdk in jobs
     }

@@ -6,6 +6,10 @@ venv/
 
 # Java
 harness/java/target/
+harness/java/variants/
+
+# Python source-built SDK venv
+harness/python/.venv-local/
 
 # Orchestrator runtime
 orchestrator/results.db

@@ -30,9 +30,13 @@ def main(argv=None) -> int:
     raw = open(args.input).read() if args.input else sys.stdin.read()
     job = json.loads(raw)
 
+    config = job.get("config", {})
+    # Surface the requested SDK source (published|local) to the executor.
+    config["sdk_source"] = job.get("sdk_source", "published")
+
     runner = ScenarioRunner(
         scenario=job["scenario"],
-        config=job.get("config", {}),
+        config=config,
         sdk_version=job.get("sdk_version", "unknown"),
         log=_stderr_log,
     )

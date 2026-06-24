@@ -1,0 +1,158 @@
+name: SDK from source
+
+# Builds the Cosmos SDK from a chosen branch/ref of an Azure SDK monorepo, then
+# runs the scenario matrix against that locally-built SDK (--source local).
+#
+# Use this to validate an unreleased SDK branch before it ships. Requires a
+# Cosmos backend (emulator or live) to exercise the real SDK — the mock backend
+# never loads the SDK, so building from source would prove nothing there.
+on:
+  workflow_dispatch:
+    inputs:
+      language:
+        description: "Which SDK to build from source"
+        type: choice
+        options: [python, java]
+        default: java
+      sdk_repo:
+        description: "Azure SDK monorepo (owner/repo)"
+        type: string
+        default: "Azure/azure-sdk-for-java"
+      sdk_ref:
+        description: "Branch, tag, or commit SHA of the SDK to build"
+        type: string
+        required: true
+      backend:
+        description: "Backend to run against (emulator or live)"
+        type: choice
+        options: [emulator, live]
+        default: emulator
+
+jobs:
+  source-matrix:
+    runs-on: ubuntu-latest
+    env:
+      LANGUAGE: ${{ github.event.inputs.language }}
+      SDK_REPO: ${{ github.event.inputs.sdk_repo }}
+      SDK_REF: ${{ github.event.inputs.sdk_ref }}
+      BACKEND: ${{ github.event.inputs.backend }}
+    steps:
+      - name: Checkout harness
+        uses: actions/checkout@v4
+        with:
+          path: harness-repo
+
+      - name: Checkout Azure SDK source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SDK_REPO }}
+          ref: ${{ env.SDK_REF }}
+          path: azure-sdk
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Set up Java
+        if: ${{ env.LANGUAGE == 'java' }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - name: Install base Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml
+
+      # --- Build the Python SDK from source into a dedicated venv --------------
+      - name: Build Python SDK from source
+        if: ${{ env.LANGUAGE == 'python' }}
+        working-directory: harness-repo
+        run: |
+          python -m venv harness/python/.venv-local
+          ./harness/python/.venv-local/bin/python -m pip install --upgrade pip
+          ./harness/python/.venv-local/bin/pip install pyyaml
+          # Install the branch's azure-cosmos package over PyPI.
+          ./harness/python/.venv-local/bin/pip install "$GITHUB_WORKSPACE/azure-sdk/sdk/cosmos/azure-cosmos"
+          echo "Resolved azure-cosmos:"
+          ./harness/python/.venv-local/bin/pip show azure-cosmos | grep -i version
+
+      # --- Build the Java SDK from source, then the harness variant jar -------
+      - name: Build Java SDK from source
+        if: ${{ env.LANGUAGE == 'java' }}
+        working-directory: azure-sdk
+        run: |
+          # Install azure-cosmos (and its reactor deps) into the local .m2 cache.
+          mvn -q -pl sdk/cosmos/azure-cosmos -am install \
+            -DskipTests -Dgpg.skip -Dspotbugs.skip -Dcheckstyle.skip -Djacoco.skip \
+            -Drevapi.skip -Dmaven.javadoc.skip=true
+          # Discover the version string this branch produced.
+          COSMOS_VER=$(mvn -q -pl sdk/cosmos/azure-cosmos -Dexec.executable=echo \
+            -Dexec.args='${project.version}' --non-recursive exec:exec 2>/dev/null | tail -1)
+          echo "COSMOS_VER=$COSMOS_VER" >> "$GITHUB_ENV"
+          echo "Built azure-cosmos version: $COSMOS_VER"
+
+      - name: Build harness variant jar against source SDK
+        if: ${{ env.LANGUAGE == 'java' }}
+        working-directory: harness-repo/harness/java
+        run: |
+          mvn -q -DskipTests -Dazure.cosmos.version="$COSMOS_VER" package
+          mkdir -p variants/local
+          cp target/cosmos-test-runner.jar variants/local/cosmos-test-runner.jar
+
+      - name: Start Cosmos emulator
+        if: ${{ env.BACKEND == 'emulator' }}
+        run: |
+          docker run -d --name cosmos-emulator \
+            -p 8081:8081 -p 10251:10251 -p 10252:10252 -p 10253:10253 -p 10254:10254 \
+            mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:latest
+
+      - name: Wait for emulator + trust certificate
+        if: ${{ env.BACKEND == 'emulator' }}
+        run: |
+          set -e
+          for i in $(seq 1 60); do
+            if curl -ksf https://localhost:8081/_explorer/emulator.pem -o /tmp/cosmos.crt; then break; fi
+            sleep 5
+          done
+          test -s /tmp/cosmos.crt || { echo "Emulator never became ready"; exit 1; }
+          sudo cp /tmp/cosmos.crt /usr/local/share/ca-certificates/cosmos.crt
+          sudo update-ca-certificates
+          if [ "$LANGUAGE" = "java" ]; then
+            sudo "$JAVA_HOME/bin/keytool" -importcert -noprompt -trustcacerts \
+              -alias cosmos-emulator -file /tmp/cosmos.crt \
+              -keystore "$JAVA_HOME/lib/security/cacerts" -storepass changeit || true
+          fi
+
+      - name: Run matrix against source-built SDK
+        working-directory: harness-repo
+        env:
+          COSMOS_ENDPOINT: ${{ secrets.COSMOS_ENDPOINT }}
+          COSMOS_KEY: ${{ secrets.COSMOS_KEY }}
+          REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+          SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+        run: |
+          python scripts/run-matrix.py \
+            --backend "$BACKEND" \
+            --sdks "$LANGUAGE" \
+            --source local \
+            --out results/
+
+      - name: Single-SDK report
+        working-directory: harness-repo
+        run: python scripts/compare.py results/ -o report.md
+
+      - name: Upload results + report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-source-${{ env.LANGUAGE }}-${{ env.BACKEND }}
+          path: |
+            harness-repo/results/
+            harness-repo/report.md
+          if-no-files-found: warn

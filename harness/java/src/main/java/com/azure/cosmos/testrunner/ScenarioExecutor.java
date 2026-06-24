@@ -89,6 +89,32 @@ public class ScenarioExecutor {
         return ISO.format(Instant.now());
     }
 
+    /**
+     * The actual azure-cosmos version loaded on the classpath (not the label the
+     * caller passed). Read from the SDK's bundled properties (the same source the
+     * SDK uses for its User-Agent), falling back to the package manifest.
+     */
+    private static String resolveSdkVersion() {
+        try {
+            Map<String, String> props =
+                    com.azure.core.util.CoreUtils.getProperties("azure-cosmos.properties");
+            if (props != null && props.get("version") != null) {
+                return props.get("version");
+            }
+        } catch (Throwable ignored) {
+            // fall through
+        }
+        try {
+            String v = com.azure.cosmos.CosmosClient.class.getPackage().getImplementationVersion();
+            if (v != null && !v.isEmpty()) {
+                return v;
+            }
+        } catch (Throwable ignored) {
+            // fall through
+        }
+        return null;
+    }
+
     private void log(String msg) {
         String line = "[" + nowIso() + "] " + msg;
         logs.add(line);
@@ -129,6 +155,8 @@ public class ScenarioExecutor {
         result.put("title", scenario.get("title"));
         result.put("sdk", "java");
         result.put("sdk_version", sdkVersion);
+        result.put("sdk_source", String.valueOf(config.getOrDefault("sdk_source", "published")));
+        result.put("resolved_sdk_version", resolveSdkVersion());
         result.put("backend", config.getOrDefault("backend", "mock"));
         result.put("status", status);
         result.put("duration_ms", durationMs);

@@ -77,6 +77,9 @@ def main(argv: List[str] | None = None) -> int:
                     help="backend tier to exercise (default: mock)")
     ap.add_argument("--sdks", default="both",
                     help="comma-separated SDKs or 'both' (default: both)")
+    ap.add_argument("--source", default="published", choices=["published", "local"],
+                    help="SDK build source: published (Maven Central/PyPI) or local "
+                         "(built from an azure-sdk-for-* branch). Default: published")
     ap.add_argument("--out", default="results",
                     help="directory to write per-job result JSON (default: results/)")
     ap.add_argument("--specs", default=SPECS_DIR, help="scenarios directory")
@@ -107,8 +110,8 @@ def main(argv: List[str] | None = None) -> int:
 
     os.makedirs(args.out, exist_ok=True)
 
-    print(f"[run-matrix] backend={args.backend} sdks={','.join(sdks)} "
-          f"scenarios={len(scenarios)}")
+    print(f"[run-matrix] backend={args.backend} source={args.source} "
+          f"sdks={','.join(sdks)} scenarios={len(scenarios)}")
 
     failures: List[str] = []
     counts = {"pass": 0, "fail": 0, "error": 0, "skip": 0}
@@ -120,8 +123,10 @@ def main(argv: List[str] | None = None) -> int:
             if args.backend not in supported:
                 result = _skip(scenario, sdk, args.backend)
             else:
+                version_label = "local-source" if args.source == "local" else default_version(sdk)
                 result = runner_dispatcher.dispatch(
-                    sdk, scenario, resolved, default_version(sdk), timeout=args.timeout
+                    sdk, scenario, resolved, version_label,
+                    source=args.source, timeout=args.timeout,
                 )
             status = result.get("status", "error")
             counts[status] = counts.get(status, 0) + 1
