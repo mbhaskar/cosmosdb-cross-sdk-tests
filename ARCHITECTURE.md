@@ -313,6 +313,12 @@ SDK Runner → localhost:18081 (Toxiproxy) → localhost:8081 (Emulator)
 
 Managed via Toxiproxy HTTP API from the orchestrator.
 
+> This layer injects faults into a **real backend** (emulator/live) and is the
+> source of truth for *current* protocol behavior. For a deterministic, offline
+> equivalent that simulates the same conditions (429, 410 Gone, partition split)
+> entirely in the mock tier, see **Control-Plane Testing & Recorded Responses**.
+> The mock DSL is calibrated against this proxy tier.
+
 #### Protocol-Level Faults (Custom Proxy)
 
 For CosmosDB-specific response injection (429, 410 Gone, partition split simulation), a lightweight **mitmproxy plugin** or custom Go proxy intercepts and modifies responses:
@@ -577,9 +583,189 @@ metrics_to_capture: [total_duration_ms, ru_consumed_total, retries_total]
 
 ---
 
-## Data Model
+## Control-Plane Testing & Recorded Responses (Mock Tier)
 
-### Database Schema
+This section documents two complementary ways to raise mock-tier fidelity without
+losing determinism: (1) using **recorded live responses** to make *data-plane*
+assertions realistic, and (2) a **stateful mock router with a timeline/fault DSL**
+to test *control-plane* behavior (partition-key-range cache, pagination, splits,
+throttling) deterministically and offline.
+
+> Relationship to the Fault Injection Layer (§5): that layer injects faults into a
+> **real backend** (Toxiproxy / mitmproxy in front of emulator or live) and is the
+> source of truth for *current* protocol behavior. The mechanisms below live
+> entirely in the **mock tier** — deterministic, offline, secret-free, every-PR —
+> and are calibrated *against* that live/proxy tier. They do not replace it.
+
+### Fidelity ladder
+
+| Tier | Source of truth | Fidelity | Needs infra/secrets | Deterministic | Catches "the world changed" |
+|------|-----------------|----------|---------------------|---------------|------------------------------|
+| `mock` (synthetic rules) | hand-authored `mock-profile.json` | low | no | yes | no |
+| `mock` + **recorded data-plane** | real responses, frozen | high (content) | record: yes / replay: no | yes | no |
+| `mock` + **stateful router/DSL** | modeled protocol contract | high (behavior) | no | yes | no (calibrated periodically) |
+| `emulator` / `live` (+ fault proxy) | the real service | highest | yes | no | **yes** |
+
+### Part A — Recorded responses as a data-plane oracle
+
+**Idea:** keep the mock as the engine, but use recordings of real responses as a
+**golden reference for response *content*** so assertions graduate from
+status-only ("create returned 201") to status + body ("…and the body carries the
+real service-shaped fields").
+
+- **Record/replay is a distinct concern from the synthetic mock.** The mock never
+  saw a real response; a recording captures *actual* RU, error messages, and body
+  shape. Two wiring options: (1) **enrich the mock's returned bodies** from
+  recordings so existing body assertions "just work"; (2) add a **drift check**
+  comparing the synthetic body to the recorded golden. Prefer (1) for realism,
+  with a periodic (2) as a "is our mock still shaped like reality?" guard.
+- **Volatile-field policy is mandatory.** Real bodies carry `_rid`, `_self`,
+  `_etag`, `_ts`, `_attachments`, activity ids, session/continuation tokens. The
+  assertion vocabulary must distinguish **exact-match** fields (your own data:
+  `id`, payload) from **presence/shape-only** fields (`_etag` is a non-empty
+  string, `_ts` is an int). Never assert exact values on volatile fields; do
+  assert they are *present and well-typed* — that catches an SDK dropping or
+  mangling system metadata.
+- **Cross-SDK representation** (Python dict vs Java POJO/JSON) must be normalized
+  in the **shared schema** so the two SDKs diverge only on real behavior, not on
+  serialization.
+
+**Data-plane vs control-plane split (the critical boundary):** recorded responses
+are safe to replay/assert for **data-plane** results (create/read/replace/delete/
+query bodies, RU, errors) because those are pure *outputs*. They are **not** safe
+to replay for **control-plane** metadata (collection cache, pkrange cache, address
+resolution, session/continuation tokens) because those responses are *inputs to
+the SDK's next routing decision* — they carry server-assigned rids, range ids,
+hash boundaries, ETags, and tokens the SDK echoes forward. Replaying a frozen
+topology snapshot into a real router desyncs subsequent operations (a recreate
+changes the rid; a split marks ranges gone) **and** freezes the very dynamics the
+metadata calls exist to exercise. Therefore:
+
+| Concern | Treatment |
+|---------|-----------|
+| Data-plane responses | **Record → replay/enrich** for assertion fidelity |
+| Control-plane / routing | **Simulate as stateful rules** (Part B), calibrated from live |
+
+### Part B — Stateful mock router + timeline/fault DSL
+
+To test control-plane behavior, the mock promotes today's flat `metadata_calls`
+counters into a **queryable, versioned topology the mock owns and can mutate
+mid-scenario**, then lets scenarios **script events** to provoke conditions
+(splits, cache staleness, throttling) that are hard to trigger on demand live.
+
+**Router state model (mock-owned, versioned):**
+
+```
+Collection   { rid, pk_path, etag }              # rid changes on recreate
+PartitionMap { etag, ranges[] }                  # etag bumps on split/merge
+  Range      { id, min_hash, max_hash, status: active|gone }
+Sessions     { <rangeId>: lsn }                  # monotonic session tokens
+Continuations = opaque blobs -> { rid, range_id, offset }   # mock-minted
+```
+
+- **ETags are the invalidation signal:** a data-plane request carries the ETag/rid
+  the SDK currently believes; the mock compares to current state to answer "stale"
+  vs "fresh."
+- **Hash routing is a fixed, documented function** in the shared spec (both runners
+  identical); scenario authors target ranges via a helper (`${pk_in_range('1')}`).
+- Existing `metadata_calls` counters remain (back-compat) but are now *derived*
+  from real state transitions.
+
+**Timeline / fault DSL (new opt-in scenario sections):**
+
+```yaml
+control_plane:            # opt-in per scenario
+  partitions: 2
+  consistency: session
+
+timeline:                 # events fire before/after a named step id
+  - after: warm_cache
+    event: split_partition
+    args: { range: "1", into: ["1-a", "1-b"] }
+  - before: hot_write
+    event: throttle
+    args: { op: create_item, count: 2, retry_after_ms: 50, ru_penalty: 1.0 }
+```
+
+Event vocabulary (each = one state mutation + one rule for how the mock answers
+the next matching request): `split_partition`, `merge_partitions`,
+`expire_pkrange_cache`, `expire_collection_cache`, `recreate_collection`,
+`throttle` (429 + retry-after), `stale_session_token`, `inject_status` (generic
+503/408). This mirrors the proxy `fault_profile` concept from §5, but resolved
+deterministically inside the mock.
+
+**Sequence/transition assertions (control-plane correctness is about the
+*reaction*, not a terminal value):**
+
+```yaml
+expect:
+  - { type: metric_delta, metric: metadata_calls.read_pk_ranges,
+      over: [query1, query5], value: 0, name: cache_reused }        # cache hit
+  - { type: sequence, of: status_codes, equals: [410, 200],
+      name: split_recovery }                                        # gone -> retry ok
+  - { type: sequence, of: metadata_calls, contains_in_order: [read_pk_ranges] }
+  - { type: pages_cover_set, expected_ids_from: seeded,
+      name: no_dupes_no_gaps }                                      # pagination integrity
+  - { type: page_size_at_most, value: 2 }
+  - { type: session_token_advanced, name: ryow }                    # read-your-writes
+```
+
+These require the runner to record a lightweight **per-step event stream** (status
+codes, metadata calls, retries — including internal SDK retries), which the mock
+can expose because it *is* the server.
+
+**Canonical worked example — split → 410 → refresh → retry:**
+
+```yaml
+timeline:
+  - after: warm_cache
+    event: split_partition
+    args: { range: "1", into: ["1-a", "1-b"] }
+steps:
+  - id: warm_cache
+    action: query_items
+    params: { query: "SELECT * FROM c", cross_partition: true }
+    expect: [ {type: ok}, {type: metric_equals, metric: metadata_calls.read_pk_ranges, value: 1} ]
+  - id: read_after_split
+    action: read_item
+    params: { id: o1, partition_key: "${pk_in_range('1')}" }
+    expect:
+      - { type: sequence, of: status_codes, equals: [410, 200], name: gone_then_ok }
+      - { type: metric_delta, metric: metadata_calls.read_pk_ranges,
+          over: [warm_cache, read_after_split], value: 1, name: exactly_one_refresh }
+```
+
+**Cross-SDK payoff:** given the *same* scripted split/throttle timeline, do Python
+and Java react identically — same number of refreshes, same retry count, same page
+boundaries? Divergence here (one SDK fails to invalidate on 410, or double-fetches)
+is a subtle bug class that is trivial to catch against a deterministic adversarial
+mock but nearly impossible to provoke live.
+
+### Anti-drift & calibration (non-negotiable)
+
+- The router model, hash function, event table, and continuation-token encoding
+  live in **one shared spec** (`specs/control-plane-schema.yaml`) both runners
+  interpret — same discipline that keeps `mock-profile.json` in sync. Identical
+  behavior is enforced by **shared golden vectors** (event sequence + PK values →
+  expected status/metadata stream).
+- The **protocol contract** the mock encodes (split → 410; stale collection → 404;
+  throttle → 429 + retry-after) is **calibrated against emulator/live** (optionally
+  via the §5 fault proxy) periodically. The mock verifies *"the SDK reacts
+  correctly to the contract"*; the live tier confirms *"the contract is current."*
+
+### Recorded-response refresh cadence
+
+The data-plane recordings (Part A) are regenerated on a schedule (e.g. weekly) via
+a `refresh-recordings` workflow: run the matrix against **live** in record mode
+for both SDKs, scrub secrets (endpoint/key/session tokens), diff vs committed
+goldens, and open a **"Weekly recording refresh" PR** summarizing what drifted
+(status/RU/error/body-shape deltas per scenario+SDK) for human review. A staleness
+gate warns when a recording is older than N days. Recordings and control-plane
+schema both stay secret-free (CI secret-scan on the recordings path).
+
+---
+
+
 
 ```sql
 -- SDK Registry
@@ -888,6 +1074,8 @@ docker-compose up
 | **P6** | Fault injection: Toxiproxy integration + custom CosmosDB proxy plugin + profile system | 4 days |
 | **P7** | Result history, cross-SDK diff view, version comparison, trend charts | 3 days |
 | **P8** | Full 280-scenario YAML spec coverage | Ongoing |
+| **P8b** | Control-plane mock tier: shared `control-plane-schema.yaml`, stateful `RouterState` (Python+Java, golden-vector parity), timeline/fault DSL, sequence/`metric_delta`/pagination assertions | 5 days |
+| **P8c** | Recorded-response data-plane oracle: recorder + scrubber, body-shape assertions (exact vs presence/typed), `refresh-recordings` weekly workflow + staleness gate | 4 days |
 | **P9** | CI integration (GitHub Actions workflow, headless mode, regression gating) | 2 days |
 | **P10** | Docker Compose for one-command startup; documentation | 2 days |
 
@@ -908,6 +1096,8 @@ docker-compose up
 | Version management | Download + cache | Maven JARs and pip packages cached locally; local builds supported via path reference |
 | Communication | REST + WebSocket | REST for CRUD; WebSocket for real-time streaming during test runs |
 | SDK version selector | Config panel dropdown | Quick switching between released and local-dev versions without restart |
+| Control-plane testing | Stateful mock router + timeline DSL (not response replay) | Metadata responses are routing *inputs*; replaying frozen topology desyncs state. A modeled, versioned router provokes splits/staleness/throttling deterministically and offline, and is cross-SDK comparable. |
+| Data-plane fidelity | Recorded live responses as a golden oracle | Upgrades assertions from status-only to status+body shape without live flake; volatile fields asserted by presence/type, exact-match only on own data. |
 
 ---
 
