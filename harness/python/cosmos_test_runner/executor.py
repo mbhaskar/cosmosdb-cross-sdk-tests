@@ -83,6 +83,10 @@ class ScenarioRunner:
         self.assertion_results: List[Dict[str, Any]] = []
         self.diagnostics: List[Dict[str, Any]] = []
         self.logs: List[str] = []
+        # metrics captured after each step id, for span assertions (metric_delta).
+        self.metric_snapshots: Dict[str, Dict[str, Any]] = {}
+        # timeline events grouped by (when, step_id).
+        self.timeline = self._index_timeline(scenario.get("timeline", []))
 
     def _log(self, msg: str) -> None:
         line = f"[{_now_iso()}] {msg}"
@@ -104,6 +108,13 @@ class ScenarioRunner:
         outcome = "ok" if result.ok else f"FAILED({result.status_code} {result.error_code})"
         self._log(f"step '{step.get('id', action)}' action={action} -> {outcome}")
 
+        # Snapshot metrics after this step so later metric_delta spans can read it.
+        if step.get("id"):
+            self.metric_snapshots[step["id"]] = self.backend.metrics.as_dict()
+
+        if result.status_sequence and result.status_sequence != [result.status_code]:
+            self._log(f"  observed status sequence: {result.status_sequence}")
+
         if result.diagnostics is not None:
             self.diagnostics.append({
                 "step": step.get("id", action),
@@ -112,7 +123,7 @@ class ScenarioRunner:
                 "text": json.dumps(result.diagnostics, indent=2),
             })
 
-        for outc in assertions.evaluate(step.get("expect", []), result, self.backend):
+        for outc in assertions.evaluate(step.get("expect", []), result, self.backend, self.metric_snapshots):
             outc["step"] = step.get("id", action)
             self.assertion_results.append(outc)
             status = "PASS" if outc["passed"] else "FAIL"
@@ -128,8 +139,14 @@ class ScenarioRunner:
         fixture = self.scenario.get("fixture")
         try:
             self._setup_fixture(fixture)
+            cp = self.scenario.get("control_plane")
+            if cp and hasattr(self.backend, "configure_control_plane"):
+                self.backend.configure_control_plane(cp)
             for step in self.scenario.get("steps", []):
+                sid = step.get("id")
+                self._fire_events("before", sid)
                 self._run_step(step)
+                self._fire_events("after", sid)
             if any(not a["passed"] for a in self.assertion_results):
                 status = "fail"
         except Exception as exc:  # noqa: BLE001
@@ -158,6 +175,34 @@ class ScenarioRunner:
             "error": error,
             "logs": self.logs,
         }
+
+    # -- timeline / control-plane events ----------------------------------- #
+
+    @staticmethod
+    def _index_timeline(timeline: List[Dict[str, Any]]) -> Dict:
+        """Group timeline events by (when, step_id). Each entry may use ``after``
+        or ``before`` to name the anchor step."""
+        idx: Dict = {}
+        for ev in timeline or []:
+            when = "before" if "before" in ev else "after"
+            anchor = ev.get(when)
+            idx.setdefault((when, anchor), []).append(ev)
+        return idx
+
+    def _fire_events(self, when: str, step_id) -> None:
+        if not step_id:
+            return
+        for ev in self.timeline.get((when, step_id), []):
+            event = ev["event"]
+            args = ev.get("args", {})
+            if not hasattr(self.backend, "control_event"):
+                self._log(f"  timeline: backend ignores control event '{event}'")
+                continue
+            self.backend.control_event(
+                event, args,
+                db_id=self.ctx.get("db"), container_id=self.ctx.get("container"),
+            )
+            self._log(f"  timeline[{when} {step_id}]: {event} {args or ''}")
 
     # -- fixture lifecycle ------------------------------------------------- #
 

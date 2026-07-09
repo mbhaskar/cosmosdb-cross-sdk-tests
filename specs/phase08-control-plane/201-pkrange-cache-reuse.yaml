@@ -1,0 +1,58 @@
+id: "C-201"
+phase: 8
+section: "8.1"
+title: "PKRange cache: one fetch, then reuse across cross-partition queries"
+description: |
+  A cross-partition query triggers a lazy ReadPartitionKeyRanges fetch on first
+  execution. Subsequent identical queries must reuse the warm cache and issue
+  zero further metadata calls, until the topology changes.
+tags: [control-plane, pkrange, cache, cross-partition]
+backends: [mock]
+# Uses control-plane assertions (metric_delta) the Java runner does not yet
+# implement; gated to python until parity lands.
+runners: [python]
+
+control_plane:
+  partitions: 4
+
+fixture:
+  database: "auto"
+  container:
+    id: "orders"
+    partition_key: "/customerId"
+
+steps:
+  - id: seed1
+    action: create_item
+    params: { item: { id: "o1", customerId: "cust-1", status: "active" } }
+    expect: [ { type: ok } ]
+  - id: seed2
+    action: create_item
+    params: { item: { id: "o2", customerId: "cust-9", status: "active" } }
+    expect: [ { type: ok } ]
+
+  - id: query1
+    action: query_items
+    params: { query: "SELECT * FROM c", cross_partition: true }
+    expect:
+      - { type: ok }
+      - { type: metric_equals, name: fetched_once, metric: metadata_calls.read_pk_ranges, value: 1 }
+  - id: query2
+    action: query_items
+    params: { query: "SELECT * FROM c", cross_partition: true }
+    expect: [ { type: ok } ]
+  - id: query3
+    action: query_items
+    params: { query: "SELECT * FROM c", cross_partition: true }
+    expect: [ { type: ok } ]
+  - id: query4
+    action: query_items
+    params: { query: "SELECT * FROM c", cross_partition: true }
+    expect: [ { type: ok } ]
+  - id: query5
+    action: query_items
+    params: { query: "SELECT * FROM c", cross_partition: true }
+    expect:
+      - { type: ok }
+      # Warm cache reused across queries 1..5: no additional PKRange fetches.
+      - { type: metric_delta, name: cache_reused, metric: metadata_calls.read_pk_ranges, over: [query1, query5], value: 0 }

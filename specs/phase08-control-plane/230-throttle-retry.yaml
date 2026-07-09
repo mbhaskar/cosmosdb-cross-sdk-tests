@@ -1,0 +1,39 @@
+id: "C-230"
+phase: 8
+section: "8.3"
+title: "Throttle (429) honored: SDK retries with backoff, then succeeds"
+description: |
+  A hot write is throttled twice (429 TooManyRequests) before it is allowed to
+  proceed. The SDK must honor retry-after, retry, and ultimately create the item
+  (201). The retries metric records the two backoff attempts.
+tags: [control-plane, throttle, 429, retry]
+backends: [mock]
+runners: [python]
+
+fixture:
+  database: "auto"
+  container:
+    id: "orders"
+    partition_key: "/customerId"
+
+timeline:
+  - before: hot_write
+    event: throttle
+    args: { op: create_item, count: 2, retry_after_ms: 50, ru_penalty: 1.0 }
+
+steps:
+  - id: hot_write
+    action: create_item
+    params: { item: { id: "hot", customerId: "cust-1", status: "active" } }
+    expect:
+      - { type: ok, name: succeeds_after_backoff }
+      - { type: status_code, name: created, value: 201 }
+      - { type: sequence, name: two_throttles_then_created, of: status_codes, equals: [429, 429, 201] }
+      - { type: metric_equals, name: two_retries, metric: retries, value: 2 }
+
+  - id: verify_written
+    action: read_item
+    params: { id: "hot", partition_key: "cust-1" }
+    expect:
+      - { type: ok }
+      - { type: field_equals, name: right_item, path: item.id, value: "hot" }

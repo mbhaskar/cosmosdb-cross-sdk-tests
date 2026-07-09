@@ -12,6 +12,25 @@
 # tags:        [string] - free-form tags for filtering
 # backends:    [string] - which backends this scenario can run on
 #                         (subset of: mock, emulator, live). Default: all.
+# runners:     [string] - optional; which SDK runners execute this scenario
+#                         (subset of: python, java). Default: all. Used to gate
+#                         control-plane scenarios to runners that implement them.
+#
+# control_plane:         - optional. Opts the scenario into the stateful mock
+#                          router (partition topology, PKRange cache, faults).
+#   partitions: int      - initial range count hint for the fixture collection
+#   consistency: string  - session|... (drives session-token behavior; reserved)
+#
+# timeline:              - optional. Schedules control-plane events relative to
+#                          steps. Each event fires after (default) or before the
+#                          named step completes.
+#   - after: <step_id>   - anchor step (use `before:` to fire before it)
+#     event: <string>    - split_partition | merge_partitions |
+#                          expire_pkrange_cache | throttle
+#     args: {...}        - event args, e.g.
+#                          split_partition: { range: "1", into: ["1-a","1-b"] }
+#                          throttle: { op: create_item, count: 2,
+#                                      retry_after_ms: 50, ru_penalty: 1.0 }
 #
 # fixture:               - optional. When present the runner provisions an
 #                          isolated database (and container) before the steps
@@ -50,5 +69,18 @@
 #   { type: field_equals, path: item.total, value: 99 }
 #   { type: metric_equals, metric: metadata_calls.read_collection, value: 1 }
 #   { type: metric_zero, metric: metadata_calls.read_pk_ranges }
+#
+# Control-plane assertion types (require control_plane/timeline; python runner):
+#   { type: metric_delta, metric: metadata_calls.read_pk_ranges,
+#     over: [stepA, stepB], value: 0 }        - metric change between two step
+#                                               snapshots (cache hit = 0)
+#   { type: sequence, of: status_codes, equals: [410, 200] }
+#                                             - exact ordered protocol responses
+#                                               observed for a step, including
+#                                               internal retries (429s / 410s)
+#   { type: sequence, of: metadata_calls, contains_in_order: [read_pk_ranges] }
+#                                             - ordered subsequence of metadata
+#                                               calls made during a step
+#   { type: page_size_at_most, value: 2 }     - result page has <= N items
 #
 # Optional `name` on any assertion overrides the reported assertion name.

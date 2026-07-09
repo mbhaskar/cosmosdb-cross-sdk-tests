@@ -1,0 +1,51 @@
+id: "C-210"
+phase: 8
+section: "8.2"
+title: "Partition split invalidates PKRange cache; SDK refreshes and retries"
+description: |
+  After the PKRange cache is warm, a partition split makes the SDK's route
+  stale. The next routed operation must observe a 410 Gone, refresh the PKRange
+  cache exactly once (ReadPartitionKeyRanges), and transparently retry to
+  success. This is the adversarial control-plane behavior only a stateful mock
+  can provoke deterministically.
+tags: [control-plane, split, pkrange, 410, retry]
+backends: [mock]
+runners: [python]
+
+control_plane:
+  partitions: 2
+
+fixture:
+  database: "auto"
+  container:
+    id: "orders"
+    partition_key: "/customerId"
+
+timeline:
+  - after: warm_cache
+    event: split_partition
+    args: { range: "1", into: ["1-a", "1-b"] }
+
+steps:
+  - id: seed1
+    action: create_item
+    params: { item: { id: "o1", customerId: "cust-1", status: "active" } }
+    expect: [ { type: ok } ]
+
+  - id: warm_cache
+    action: query_items
+    params: { query: "SELECT * FROM c", cross_partition: true }
+    expect:
+      - { type: ok }
+      - { type: metric_equals, name: pkrange_fetched, metric: metadata_calls.read_pk_ranges, value: 1 }
+
+  - id: read_after_split
+    action: read_item
+    params: { id: "o1", partition_key: "cust-1" }
+    expect:
+      - { type: ok, name: eventually_succeeds }
+      # 410 Gone (stale route) then 200 after the SDK refreshes and retries.
+      - { type: sequence, name: gone_then_ok, of: status_codes, equals: [410, 200] }
+      # Exactly one PKRange refresh happened between warming and the retry.
+      - { type: metric_delta, name: exactly_one_refresh, metric: metadata_calls.read_pk_ranges, over: [warm_cache, read_after_split], value: 1 }
+      - { type: sequence, name: refresh_occurred, of: metadata_calls, contains_in_order: [read_pk_ranges] }

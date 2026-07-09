@@ -36,6 +36,12 @@ class OpResult:
     items: Optional[List[Dict[str, Any]]] = None
     ru: float = 0.0
     diagnostics: Optional[Dict[str, Any]] = None
+    # Control-plane event streams (populated by the mock, which *is* the server).
+    # status_sequence includes any internal protocol responses the SDK would see
+    # before the final one (e.g. [410, 200] on a split refresh, [429, 429, 201]
+    # on throttle). metadata_events lists metadata calls made during the op.
+    status_sequence: List[int] = field(default_factory=list)
+    metadata_events: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -127,6 +133,22 @@ class MockBackend(Backend):
         self.ru = profile["ru_charges"]
         self.codes = profile["status_codes"]
         self.ops = profile["operations"]
+        # ---- control-plane state (mock owns the topology) -------------------
+        # Per-container flag: has the SDK's PKRange cache been populated? A split
+        # or explicit expiry invalidates it, forcing exactly one refresh.
+        self._pkrange_cache_valid: Dict[str, bool] = {}
+        # Containers armed with a one-shot 410 Gone on the next routed op (set by
+        # split_partition / merge_partitions), modelling a stale partition route.
+        self._split_armed: Dict[str, bool] = {}
+        # Pending throttle faults keyed by op name -> remaining {count, retry_after_ms, ru_penalty}.
+        self._throttle: Dict[str, Dict[str, Any]] = {}
+        # Event recorder for the op currently executing (reset per public op).
+        self._events: Dict[str, List] = {"status": [], "metadata": []}
+
+    # Data-plane ops routed to a partition: eligible for split (410) faults and
+    # PKRange-cache accounting.
+    _ROUTED_OPS = {"read_item", "replace_item", "upsert_item", "delete_item",
+                   "create_item", "query_items"}
 
     # -- public Backend API: each builds a context and runs the profile --- #
 
@@ -172,6 +194,17 @@ class MockBackend(Backend):
     # -- interpreter ------------------------------------------------------- #
 
     def _run(self, op: str, ctx: Dict[str, Any]) -> OpResult:
+        """Public entry: apply any scheduled control-plane faults, run the profile
+        step machine, and attach the observed event streams to the result."""
+        self._events = {"status": [], "metadata": []}
+        if op in self._ROUTED_OPS:
+            self._apply_faults(op, ctx)
+        result = self._execute(op, ctx)
+        result.status_sequence = list(self._events["status"]) + [result.status_code]
+        result.metadata_events = list(self._events["metadata"])
+        return result
+
+    def _execute(self, op: str, ctx: Dict[str, Any]) -> OpResult:
         ctx["container"] = self._container(ctx.get("db_id"), ctx.get("container_id"))
         for step in self.ops[op]:
             if "guard" in step:
@@ -183,6 +216,64 @@ class MockBackend(Backend):
             elif "return" in step:
                 return self._build(step["return"], ctx)
         raise RuntimeError(f"mock profile op '{op}' produced no result")
+
+    # -- control plane ----------------------------------------------------- #
+
+    @staticmethod
+    def _ckey(ctx) -> str:
+        return f"{ctx.get('db_id')}/{ctx.get('container_id')}"
+
+    def _refresh_pkranges(self, ckey: str) -> None:
+        """Model a ReadPartitionKeyRanges call: one metadata fetch, cache valid."""
+        self.metrics.metadata_calls["read_pk_ranges"] += 1
+        self._events["metadata"].append("read_pk_ranges")
+        self._pkrange_cache_valid[ckey] = True
+
+    def _apply_faults(self, op: str, ctx) -> None:
+        ckey = self._ckey(ctx)
+        # Throttling: emit N x 429 before the op is allowed to proceed.
+        thr = self._throttle.get(op)
+        if thr and thr["count"] > 0:
+            for _ in range(thr["count"]):
+                self._events["status"].append(self.codes["too_many_requests"])
+                self.metrics.retries += 1
+                if thr.get("ru_penalty"):
+                    self.metrics.ru_consumed += float(thr["ru_penalty"])
+            del self._throttle[op]
+        # Stale partition route after a split: one 410 Gone, then the SDK refreshes
+        # its PKRange cache and retries (so exactly one read_pk_ranges follows).
+        if self._split_armed.get(ckey):
+            self._events["status"].append(self.codes["gone"])
+            self.metrics.retries += 1
+            self._split_armed[ckey] = False
+            self._refresh_pkranges(ckey)
+
+    def control_event(self, event: str, args: Optional[Dict[str, Any]] = None,
+                      db_id: Optional[str] = None, container_id: Optional[str] = None) -> None:
+        """Apply a timeline-scheduled control-plane mutation to the router state."""
+        args = args or {}
+        ckey = f"{db_id}/{container_id}"
+        if event in ("split_partition", "merge_partitions"):
+            # Topology changed: stale the PKRange cache and arm a one-shot 410 on
+            # the next routed op against this container.
+            self._pkrange_cache_valid[ckey] = False
+            self._split_armed[ckey] = True
+        elif event == "expire_pkrange_cache":
+            # Cache stale without a 410; next cross-partition op does one refresh.
+            self._pkrange_cache_valid[ckey] = False
+        elif event == "throttle":
+            self._throttle[args["op"]] = {
+                "count": int(args.get("count", 1)),
+                "retry_after_ms": int(args.get("retry_after_ms", 0)),
+                "ru_penalty": float(args.get("ru_penalty", 0.0)),
+            }
+        else:
+            raise ValueError(f"unknown control-plane event '{event}'")
+
+    def configure_control_plane(self, cp: Dict[str, Any]) -> None:  # noqa: ARG002
+        """Reserved for future use (initial partition count, consistency). The
+        current model derives topology lazily, so this is a no-op today."""
+        return None
 
     def _container(self, db_id, container_id) -> Optional[Dict[str, Any]]:
         return self.databases.get(db_id, {}).get("containers", {}).get(container_id)
@@ -235,13 +326,19 @@ class MockBackend(Backend):
             self.metrics.connections_opened = 1
         elif name == "incr_metadata":
             self.metrics.metadata_calls[step["counter"]] += 1
+            self._events["metadata"].append(step["counter"])
         elif name == "touch_collection":
             if c is not None and not c["read_collection_done"]:
                 c["read_collection_done"] = True
                 self.metrics.metadata_calls["read_collection"] += 1
+                self._events["metadata"].append("read_collection")
         elif name == "touch_pk_ranges_if_cross":
             if ctx.get("cross_partition"):
-                self.metrics.metadata_calls["read_pk_ranges"] += 1
+                ckey = self._ckey(ctx)
+                # Lazy PKRange fetch, but only when the cache is cold/stale. A warm
+                # cache is reused (zero metadata calls) until a split expires it.
+                if not self._pkrange_cache_valid.get(ckey):
+                    self._refresh_pkranges(ckey)
         elif name == "assign_id":
             ctx["item"].setdefault("id", _new_id())
         elif name == "put_database":

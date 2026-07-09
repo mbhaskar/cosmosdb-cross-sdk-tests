@@ -119,8 +119,14 @@ def main(argv: List[str] | None = None) -> int:
     for scenario in scenarios:
         sid = str(scenario["id"])
         supported = scenario.get("backends", ["mock"])
+        # Optional per-scenario SDK gate (e.g. control-plane scenarios that only
+        # the Python runner implements today). Defaults to all runners.
+        allowed_runners = scenario.get("runners")
         for sdk in sdks:
-            if args.backend not in supported:
+            if allowed_runners and sdk not in allowed_runners:
+                result = _skip(scenario, sdk, args.backend)
+                result["logs"] = [f"scenario limited to runners {allowed_runners}"]
+            elif args.backend not in supported:
                 result = _skip(scenario, sdk, args.backend)
             else:
                 version_label = "local-source" if args.source == "local" else default_version(sdk)

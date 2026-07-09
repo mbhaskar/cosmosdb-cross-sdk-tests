@@ -39,15 +39,31 @@ def _metric(backend: Backend, name: str) -> Any:
     return cur
 
 
-def evaluate(expectations: List[Dict[str, Any]], result: OpResult, backend: Backend) -> List[Dict[str, Any]]:
-    """Return a list of assertion outcomes ({name, passed, detail})."""
+def evaluate(expectations: List[Dict[str, Any]], result: OpResult, backend: Backend,
+             snapshots: Dict[str, Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """Return a list of assertion outcomes ({name, passed, detail}).
+
+    ``snapshots`` maps step id -> metrics dict captured after that step ran; it
+    powers span assertions like ``metric_delta`` that compare two points in time.
+    """
     outcomes: List[Dict[str, Any]] = []
     for exp in expectations or []:
-        outcomes.append(_evaluate_one(exp, result, backend))
+        outcomes.append(_evaluate_one(exp, result, backend, snapshots or {}))
     return outcomes
 
 
-def _evaluate_one(exp: Dict[str, Any], result: OpResult, backend: Backend) -> Dict[str, Any]:
+def _metric_from(snapshot: Dict[str, Any], path: str) -> Any:
+    cur: Any = snapshot
+    for part in path.split("."):
+        if isinstance(cur, dict):
+            cur = cur.get(part)
+        else:
+            return None
+    return cur
+
+
+def _evaluate_one(exp: Dict[str, Any], result: OpResult, backend: Backend,
+                  snapshots: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     t = exp.get("type")
     name = exp.get("name") or t
 
@@ -79,4 +95,39 @@ def _evaluate_one(exp: Dict[str, Any], result: OpResult, backend: Backend) -> Di
         actual = _metric(backend, exp["metric"])
         return outcome(actual == 0, f"actual={actual!r}")
 
+    # --- control-plane assertions ---------------------------------------- #
+    if t == "metric_delta":
+        # Compare a metric between two step snapshots: value == snap[b] - snap[a].
+        over = exp.get("over") or []
+        if len(over) != 2:
+            return outcome(False, "metric_delta requires over: [stepA, stepB]")
+        step_a, step_b = over
+        snap_a, snap_b = snapshots.get(step_a), snapshots.get(step_b)
+        if snap_a is None or snap_b is None:
+            return outcome(False, f"missing snapshot(s) for {over} (have {list(snapshots)})")
+        a = _metric_from(snap_a, exp["metric"]) or 0
+        b = _metric_from(snap_b, exp["metric"]) or 0
+        delta = b - a
+        return outcome(delta == exp["value"], f"delta={delta} (a={a} b={b})")
+    if t == "sequence":
+        of = exp.get("of", "status_codes")
+        actual = list(result.status_sequence if of == "status_codes" else result.metadata_events)
+        if "equals" in exp:
+            want = exp["equals"]
+            return outcome(actual == want, f"actual={actual} want={want}")
+        if "contains_in_order" in exp:
+            want = exp["contains_in_order"]
+            ok = _contains_in_order(actual, want)
+            return outcome(ok, f"actual={actual} expected_subsequence={want}")
+        return outcome(False, "sequence needs 'equals' or 'contains_in_order'")
+    if t == "page_size_at_most":
+        actual = len(result.items or [])
+        return outcome(actual <= exp["value"], f"actual={actual}")
+
     return outcome(False, f"unknown assertion type '{t}'")
+
+
+def _contains_in_order(actual: List[Any], want: List[Any]) -> bool:
+    """True if ``want`` appears as an ordered (not necessarily contiguous) subsequence."""
+    it = iter(actual)
+    return all(any(x == w for x in it) for w in want)
