@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional
@@ -115,3 +116,57 @@ class ProxyFaultController:
         for proxy, names in list(self._added.items()):
             for name in list(names):
                 self._remove_toxic(proxy, name)
+
+
+class ProtocolFaultController:
+    """Drives Layer-7 protocol faults (e.g. a time-windowed 429 storm) via the
+    mitmproxy addon in ``proxy/mitm/throttle_window.py``.
+
+    Toxiproxy (see :class:`ProxyFaultController`) is TCP-only and cannot emit an
+    HTTP status code, so the ``net_throttle_window`` / ``throttle_window_clear``
+    timeline verbs are routed here instead. The control channel is the magic
+    ``/__fault/*`` path served by the addon on the same proxy endpoint the SDK
+    talks to (default ``$MITM_ENDPOINT`` / the scenario's proxy endpoint).
+    """
+
+    def __init__(self, control_endpoint: Optional[str] = None):
+        self.control_endpoint = (control_endpoint
+                                 or os.environ.get("MITM_ENDPOINT", "https://localhost:18091")).rstrip("/")
+
+    def _post(self, path: str) -> Any:
+        url = f"{self.control_endpoint}{path}"
+        req = urllib.request.Request(url, data=b"", method="POST",
+                                     headers={"Content-Type": "application/json"})
+        # The mitm/emulator endpoint uses a self-signed cert; the control call is
+        # local and carries no secrets, so skip verification here.
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        try:
+            with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
+                raw = resp.read()
+                return json.loads(raw) if raw else None
+        except urllib.error.HTTPError as exc:
+            raise ProxyError(f"POST {path} -> HTTP {exc.code}: {exc.read().decode(errors='replace')}") from exc
+        except urllib.error.URLError as exc:
+            raise ProxyError(f"cannot reach mitmproxy control at {self.control_endpoint}: {exc.reason}. "
+                             f"Start proxy/mitm (see proxy/README.md) first.") from exc
+
+    def apply(self, event: str, args: Dict[str, Any]) -> None:
+        args = args or {}
+        if event == "net_throttle_window":
+            seconds = args.get("seconds", 120)
+            retry_after_ms = args.get("retry_after_ms", 1000)
+            status = args.get("status", 429)
+            self._post(f"/__fault/throttle?seconds={seconds}"
+                       f"&retry_after_ms={retry_after_ms}&status={status}")
+        elif event == "throttle_window_clear":
+            self._post("/__fault/clear")
+        else:
+            raise ValueError(f"unknown protocol-fault event '{event}'")
+
+    def reset(self) -> None:
+        try:
+            self._post("/__fault/clear")
+        except ProxyError:
+            pass

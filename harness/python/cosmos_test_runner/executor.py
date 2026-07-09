@@ -120,6 +120,8 @@ class ScenarioRunner:
         self.timeline = self._index_timeline(scenario.get("timeline", []))
         # Lazily-built Toxiproxy controller for net_* / region_* timeline verbs.
         self.fault_controller = self._make_fault_controller()
+        # Lazily-built mitmproxy controller for L7 protocol verbs (throttle window).
+        self.protocol_controller = self._make_protocol_controller()
 
     def _make_fault_controller(self):
         if not self.fault_injection or self.config.get("backend") == "mock":
@@ -134,6 +136,20 @@ class ScenarioRunner:
             proxy=fi.get("proxy", "cosmos"),
             secondary_proxy=fi.get("secondary_proxy", "cosmos-secondary"),
         )
+
+    def _make_protocol_controller(self):
+        if not self.fault_injection or self.config.get("backend") == "mock":
+            return None
+        try:
+            from .faults import ProtocolFaultController
+        except Exception:  # noqa: BLE001
+            return None
+        # Control channel lives on the mitm endpoint (falls back to the proxy /
+        # SDK endpoint, since the addon serves /__fault/* on the same port).
+        endpoint = (self.config.get("mitm_endpoint")
+                    or self.config.get("proxy_endpoint")
+                    or self.config.get("endpoint"))
+        return ProtocolFaultController(control_endpoint=endpoint)
 
     def _log(self, msg: str) -> None:
         line = f"[{_now_iso()}] {msg}"
@@ -248,6 +264,11 @@ class ScenarioRunner:
                     self.fault_controller.reset()
                 except Exception as exc:  # noqa: BLE001
                     self._log(f"fault reset warning: {exc}")
+            if self.protocol_controller is not None:
+                try:
+                    self.protocol_controller.reset()
+                except Exception as exc:  # noqa: BLE001
+                    self._log(f"protocol reset warning: {exc}")
             self._teardown_fixture(fixture)
 
         duration_ms = int((time.time() - t0) * 1000)
@@ -285,6 +306,7 @@ class ScenarioRunner:
 
     _TRANSPORT_EVENTS = {"net_latency", "net_timeout", "net_reset", "net_bandwidth",
                          "net_slow_close", "region_down", "region_up", "reset_faults"}
+    _PROTOCOL_EVENTS = {"net_throttle_window", "throttle_window_clear"}
 
     def _fire_events(self, when: str, step_id) -> None:
         if not step_id:
@@ -292,7 +314,16 @@ class ScenarioRunner:
         for ev in self.timeline.get((when, step_id), []):
             event = ev["event"]
             args = ev.get("args", {})
-            # Transport faults (Toxiproxy) vs mock control-plane faults.
+            # L7 protocol faults (mitmproxy: throttle window / 429s).
+            if event in self._PROTOCOL_EVENTS:
+                if self.protocol_controller is None:
+                    self._log(f"  timeline[{when} {step_id}]: '{event}' skipped "
+                              f"(no protocol controller; needs emulator/live + mitmproxy)")
+                    continue
+                self.protocol_controller.apply(event, args)
+                self._log(f"  timeline[{when} {step_id}]: {event} {args or ''}")
+                continue
+            # L4 transport faults (Toxiproxy) vs mock control-plane faults.
             if event in self._TRANSPORT_EVENTS:
                 if self.fault_controller is None:
                     self._log(f"  timeline[{when} {step_id}]: '{event}' skipped "

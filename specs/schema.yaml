@@ -26,10 +26,12 @@
 #                          named step completes.
 #   - after: <step_id>   - anchor step (use `before:` to fire before it)
 #     event: <string>    - split_partition | merge_partitions |
-#                          expire_pkrange_cache | throttle       (mock tier)
+#                          expire_pkrange_cache | throttle       (mock tier, L7)
 #                          net_latency | net_timeout | net_reset |
 #                          net_bandwidth | net_slow_close |
-#                          region_down | region_up | reset_faults (proxy tier)
+#                          region_down | region_up | reset_faults (proxy tier, L4)
+#                          net_throttle_window | throttle_window_clear
+#                                                                 (proxy tier, L7)
 #     args: {...}        - event args, e.g.
 #                          split_partition: { range: "1", into: ["1-a","1-b"] }
 #                          throttle: { op: create_item, count: 2,
@@ -39,18 +41,24 @@
 #                          net_bandwidth: { rate_kbps: 8 }
 #                          net_slow_close: { delay_ms: 500 }
 #                          region_down/region_up: { region: primary }
-#   Mock verbs (split/throttle/...) are routed to the stateful mock backend;
-#   net_*/region_*/reset_faults verbs are routed to Toxiproxy (see
-#   fault_injection) when the backend is emulator/live. On the mock tier the
-#   transport verbs log-and-skip (no controller).
+#                          net_throttle_window: { seconds: 120,
+#                                      retry_after_ms: 1000, status: 429 }
+#   Routing: mock verbs (split/throttle/...) -> stateful mock backend;
+#   net_*/region_*/reset_faults (L4 TCP) -> Toxiproxy; net_throttle_window /
+#   throttle_window_clear (L7 HTTP status) -> mitmproxy addon
+#   (proxy/mitm/throttle_window.py). Toxiproxy is TCP-only and CANNOT emit a
+#   429 -- that is why the throttle window is a separate mitmproxy verb. On the
+#   mock tier the transport/protocol verbs log-and-skip (no controller).
 #
-# fault_injection:       - optional. Opts the scenario into the Toxiproxy
-#                          transport-fault stack (proxy/docker-compose.proxy.yaml).
-#                          Only meaningful on emulator/live backends; the executor
-#                          then routes the SDK client through the proxy endpoint.
+# fault_injection:       - optional. Opts the scenario into the fault-injection
+#                          proxy stack (proxy/docker-compose.proxy.yaml). Only
+#                          meaningful on emulator/live backends; the executor then
+#                          routes the SDK client through the proxy endpoint.
 #   proxy: cosmos        - Toxiproxy proxy name the timeline net_* verbs target
 #   multi_region: bool   - when true the scenario expects a secondary proxy route
 #                          (cosmos-secondary) for failover (T-305)
+#   protocol: mitmproxy  - when set the scenario uses L7 verbs (net_throttle_window)
+#                          served by the mitmproxy addon (T-307)
 #
 # fixture:               - optional. When present the runner provisions an
 #                          isolated database (and container) before the steps

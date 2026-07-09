@@ -46,3 +46,30 @@ services:
     command: ["-host", "0.0.0.0", "-config", "/config/toxiproxy.json"]
     volumes:
       - ./toxiproxy.json:/config/toxiproxy.json:ro
+
+  # Layer-7 protocol-fault proxy (mitmproxy). Sits IN FRONT of Toxiproxy so the
+  # full chain is:  SDK -> mitmproxy(:18091) -> toxiproxy(:18081) -> emulator.
+  # Toxiproxy is TCP-only and cannot emit an HTTP 429; this addon does. Point the
+  # SDK at :18091 to get both tiers, or at :18081 for transport faults only.
+  # Drive the throttle window via POST https://localhost:18091/__fault/throttle.
+  mitmproxy:
+    image: mitmproxy/mitmproxy:11.0.0
+    container_name: mitmproxy
+    depends_on:
+      - toxiproxy
+    ports:
+      - "18091:18091"   # SDK-facing listen port (L7 + L4 chain)
+    command:
+      - mitmdump
+      - --listen-host
+      - 0.0.0.0
+      - --listen-port
+      - "18091"
+      - --mode
+      - reverse:https://toxiproxy:18081
+      - --set
+      - ssl_insecure=true
+      - -s
+      - /addons/throttle_window.py
+    volumes:
+      - ./mitm:/addons:ro
