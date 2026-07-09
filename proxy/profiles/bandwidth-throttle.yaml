@@ -1,0 +1,10 @@
+# Caps throughput to a trickle, stretching large payload transfers. Used by T-304
+# to observe paginated cross-partition query drain under slow I/O.
+name: bandwidth-throttle
+proxy: cosmos
+toxics:
+  - name: slow_pipe
+    type: bandwidth
+    stream: downstream
+    attributes:
+      rate: 32          # KB/s

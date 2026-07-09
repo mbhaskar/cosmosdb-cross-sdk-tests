@@ -1,0 +1,14 @@
+[
+  {
+    "name": "cosmos",
+    "listen": "0.0.0.0:18081",
+    "upstream": "cosmos-emulator:8081",
+    "enabled": true
+  },
+  {
+    "name": "cosmos-secondary",
+    "listen": "0.0.0.0:18082",
+    "upstream": "cosmos-emulator:8081",
+    "enabled": true
+  }
+]

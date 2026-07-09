@@ -1,0 +1,50 @@
+id: "T-301"
+phase: 6
+section: "6.1"
+title: "Connect timeout is retried and recovers once the network heals"
+description: |
+  Toxiproxy black-holes the upstream (timeout toxic) before a point read, so the
+  SDK hits its connect/request timeout and must retry. The fault is cleared right
+  after, so a subsequent read recovers. Verifies the SDK's retry policy survives
+  a transient transport outage rather than surfacing a hard failure.
+
+  Transport-level fault: requires the emulator + Toxiproxy stack
+  (proxy/docker-compose.proxy.yaml). Not runnable in the offline mock tier.
+tags: [fault-injection, transport, timeout, retry, toxiproxy]
+backends: [emulator, live]
+runners: [python]
+
+fault_injection:
+  proxy: cosmos
+
+fixture:
+  database: "auto"
+  container:
+    id: "orders"
+    partition_key: "/customerId"
+
+timeline:
+  - after: seed
+    event: net_timeout
+    args: { timeout_ms: 0 }          # hold connections open, deliver nothing
+  - after: read_during_outage
+    event: reset_faults              # network heals
+
+steps:
+  - id: seed
+    action: create_item
+    params: { item: { id: "o1", customerId: "cust-1", status: "active" } }
+    expect: [ { type: ok } ]
+
+  - id: read_during_outage
+    action: read_item
+    params: { id: "o1", partition_key: "cust-1" }
+    expect:
+      - { type: retry_count_gte, name: retried_under_timeout, value: 1 }
+
+  - id: read_after_heal
+    action: read_item
+    params: { id: "o1", partition_key: "cust-1" }
+    expect:
+      - { type: eventually_ok, name: recovers_after_heal }
+      - { type: field_equals, name: right_item, path: item.id, value: "o1" }

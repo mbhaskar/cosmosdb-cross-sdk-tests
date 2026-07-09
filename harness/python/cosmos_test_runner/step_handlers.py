@@ -25,6 +25,8 @@ def execute_action(backend: Backend, action: str, params: Dict[str, Any], ctx: D
         )
     if action == "create_item":
         return backend.create_item(db, container, params["item"])
+    if action == "seed_items":
+        return backend.seed_items(db, container, params["count"], params["template"])
     if action == "read_item":
         return backend.read_item(db, container, params["id"], params["partition_key"])
     if action == "replace_item":
@@ -39,6 +41,16 @@ def execute_action(backend: Backend, action: str, params: Dict[str, Any], ctx: D
             parameters=params.get("parameters", []),
             partition_key=params.get("partition_key"),
             cross_partition=params.get("cross_partition", False),
+        )
+    if action == "query_drain":
+        # Drain a (paginated) query to exhaustion. Both backends already
+        # materialize the full result set, so this is a cross-partition query
+        # that the SDK streams under whatever transport conditions are active.
+        return backend.query_items(
+            db, container, params["query"],
+            parameters=params.get("parameters", []),
+            partition_key=params.get("partition_key"),
+            cross_partition=params.get("cross_partition", True),
         )
     if action == "delete_database":
         return backend.delete_database(params["id"])

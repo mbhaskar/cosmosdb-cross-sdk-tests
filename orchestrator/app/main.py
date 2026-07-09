@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import config_resolver, runner_dispatcher, scenario_loader
+from . import config_resolver, proxy_manager, runner_dispatcher, scenario_loader
 from .store import Store
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -97,6 +97,35 @@ def get_scenario(scenario_id: str):
 @app.get("/api/sdks")
 def list_sdks():
     return runner_dispatcher.available_sdks()
+
+
+@app.get("/api/proxy/profiles")
+def list_proxy_profiles():
+    """List the declarative Toxiproxy fault profiles (proxy/profiles/*.yaml)."""
+    return {"profiles": proxy_manager.list_profiles()}
+
+
+class ProxyActivateRequest(BaseModel):
+    profile: str
+    proxy: Optional[str] = None
+
+
+@app.post("/api/proxy/activate")
+def activate_proxy_profile(req: ProxyActivateRequest):
+    """Apply a fault profile against the running Toxiproxy stack."""
+    try:
+        return proxy_manager.activate(req.profile, req.proxy)
+    except proxy_manager.ProxyError as exc:
+        raise HTTPException(502, str(exc))
+
+
+@app.post("/api/proxy/clear")
+def clear_proxy(proxy: str = "cosmos"):
+    """Remove all toxics from a proxy (network heals)."""
+    try:
+        return proxy_manager.clear(proxy)
+    except proxy_manager.ProxyError as exc:
+        raise HTTPException(502, str(exc))
 
 
 @app.get("/api/runs")

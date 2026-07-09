@@ -1,0 +1,50 @@
+id: "T-306"
+phase: 6
+section: "6.6"
+title: "Slow connection teardown does not leak or storm connections"
+description: |
+  A slow_close toxic delays TCP FIN/close on the upstream so connections linger
+  in a half-open state. Under a sustained read loop this stresses the SDK's
+  connection pool: a healthy pool reuses connections and stays bounded rather
+  than opening a new socket per request (connection storm) or leaking half-open
+  ones. Verifies pool stability and continued success under the fault.
+
+  Transport-level fault: requires the emulator + Toxiproxy stack. Not runnable
+  in the offline mock tier.
+tags: [fault-injection, transport, slow-close, connection-pool, load, toxiproxy]
+backends: [emulator, live]
+runners: [python]
+
+fault_injection:
+  proxy: cosmos
+
+fixture:
+  database: "auto"
+  container:
+    id: "orders"
+    partition_key: "/customerId"
+
+timeline:
+  - after: seed
+    event: net_slow_close
+    args: { delay_ms: 500 }
+  - after: sustained_reads
+    event: reset_faults
+
+steps:
+  - id: seed
+    action: create_item
+    params: { item: { id: "o1", customerId: "cust-1", status: "active" } }
+    expect: [ { type: ok } ]
+
+  - id: sustained_reads
+    action: loop
+    duration: "10s"
+    steps:
+      - id: read
+        action: read_item
+        params: { id: "o1", partition_key: "cust-1" }
+        expect: [ { type: ok } ]
+    expect:
+      - { type: resource_stable, name: no_connection_storm, metric: connections_opened, tolerance_pct: 30 }
+      - { type: latency_percentile, name: p95_bounded, percentile: 95, max_ms: 3000 }

@@ -1,0 +1,11 @@
+# Takes the primary region's proxy fully offline (all connections time out) while
+# the secondary stays healthy. Used by T-305 to exercise preferred_regions
+# failover. region_up (clearing this) restores the primary.
+name: region-down
+proxy: cosmos
+toxics:
+  - name: region_black_hole
+    type: timeout
+    stream: upstream
+    attributes:
+      timeout: 0

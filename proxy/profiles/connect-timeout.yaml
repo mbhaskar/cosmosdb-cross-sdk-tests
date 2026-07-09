@@ -1,0 +1,10 @@
+# Makes the upstream never respond, so the SDK hits its connect/request timeout.
+# Applied for a bounded window then cleared, so retries can recover. Used by T-301.
+name: connect-timeout
+proxy: cosmos
+toxics:
+  - name: black_hole
+    type: timeout
+    stream: upstream
+    attributes:
+      timeout: 0        # 0 = hold the connection open, never deliver data

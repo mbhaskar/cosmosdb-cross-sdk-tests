@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List
 
 from .backends import Backend, OpResult
@@ -40,15 +41,18 @@ def _metric(backend: Backend, name: str) -> Any:
 
 
 def evaluate(expectations: List[Dict[str, Any]], result: OpResult, backend: Backend,
-             snapshots: Dict[str, Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+             snapshots: Dict[str, Dict[str, Any]] = None,
+             context: Dict[str, Any] = None) -> List[Dict[str, Any]]:
     """Return a list of assertion outcomes ({name, passed, detail}).
 
     ``snapshots`` maps step id -> metrics dict captured after that step ran; it
-    powers span assertions like ``metric_delta`` that compare two points in time.
+    powers span assertions like ``metric_delta``. ``context`` carries latency /
+    resource sample series (keyed by scope) and the current scope, for the
+    transport-fault assertions (latency_percentile / resource_stable).
     """
     outcomes: List[Dict[str, Any]] = []
     for exp in expectations or []:
-        outcomes.append(_evaluate_one(exp, result, backend, snapshots or {}))
+        outcomes.append(_evaluate_one(exp, result, backend, snapshots or {}, context or {}))
     return outcomes
 
 
@@ -63,7 +67,8 @@ def _metric_from(snapshot: Dict[str, Any], path: str) -> Any:
 
 
 def _evaluate_one(exp: Dict[str, Any], result: OpResult, backend: Backend,
-                  snapshots: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+                  snapshots: Dict[str, Dict[str, Any]],
+                  context: Dict[str, Any]) -> Dict[str, Any]:
     t = exp.get("type")
     name = exp.get("name") or t
 
@@ -124,7 +129,59 @@ def _evaluate_one(exp: Dict[str, Any], result: OpResult, backend: Backend,
         actual = len(result.items or [])
         return outcome(actual <= exp["value"], f"actual={actual}")
 
+    # --- transport-fault assertions (emulator/live tier) ----------------- #
+    if t == "eventually_ok":
+        # Op succeeded (after any injected transport fault was cleared / retried).
+        return outcome(result.ok, f"status={result.status_code}" if not result.ok else "")
+    if t == "retry_count_gte":
+        actual = _metric(backend, "retries")
+        return outcome((actual or 0) >= exp["value"], f"retries={actual}")
+    if t == "latency_percentile":
+        scope = exp.get("scope") or context.get("scope")
+        samples = (context.get("latency") or {}).get(scope) or []
+        if not samples:
+            return outcome(False, f"no latency samples for scope {scope!r}")
+        p = _percentile(samples, exp.get("percentile", 99))
+        return outcome(p <= exp["max_ms"], f"p{exp.get('percentile', 99)}={p:.1f}ms n={len(samples)}")
+    if t == "resource_stable":
+        scope = exp.get("scope") or context.get("scope")
+        samples = (context.get("resource") or {}).get(scope) or []
+        if len(samples) < 2:
+            return outcome(False, f"insufficient resource samples for scope {scope!r}")
+        lo, hi = min(samples), max(samples)
+        drift = 0.0 if hi == 0 else (hi - lo) / hi * 100.0
+        return outcome(drift <= exp.get("tolerance_pct", 10),
+                       f"drift={drift:.1f}% (min={lo} max={hi} n={len(samples)})")
+    if t == "failover_region":
+        # Best-effort: the contacted region is surfaced in SDK diagnostics headers
+        # on emulator/live. Offline/mock has no diagnostics, so this fails clearly.
+        want = str(exp.get("equals", ""))
+        blob = json.dumps(result.diagnostics or {})
+        return outcome(want and want in blob, f"want_region={want!r} present={want in blob}")
+    if t == "pages_cover_set":
+        ids = [str((r or {}).get("id")) for r in (result.items or []) if isinstance(r, dict)]
+        unique = set(ids)
+        no_dupes = len(ids) == len(unique)
+        expected = exp.get("expected_count")
+        covers = expected is None or len(unique) == expected
+        return outcome(no_dupes and covers,
+                       f"n={len(ids)} unique={len(unique)} expected={expected} no_dupes={no_dupes}")
+
     return outcome(False, f"unknown assertion type '{t}'")
+
+
+def _percentile(samples: List[float], pct: float) -> float:
+    if not samples:
+        return 0.0
+    ordered = sorted(samples)
+    if len(ordered) == 1:
+        return ordered[0]
+    rank = (pct / 100.0) * (len(ordered) - 1)
+    lo = int(rank)
+    frac = rank - lo
+    if lo + 1 >= len(ordered):
+        return ordered[-1]
+    return ordered[lo] + (ordered[lo + 1] - ordered[lo]) * frac
 
 
 def _contains_in_order(actual: List[Any], want: List[Any]) -> bool:

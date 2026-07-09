@@ -1,0 +1,50 @@
+id: "T-303"
+phase: 6
+section: "6.3"
+title: "Peer connection reset mid-flight is retried transparently"
+description: |
+  A reset_peer toxic tears down the TCP connection so an in-flight read fails
+  with a connection reset. A resilient SDK should re-establish the connection
+  and retry rather than surfacing the raw socket error. The fault is one-shot in
+  spirit (cleared right after), so the retried request succeeds.
+
+  Transport-level fault: requires the emulator + Toxiproxy stack. Not runnable
+  in the offline mock tier.
+tags: [fault-injection, transport, reset, retry, toxiproxy]
+backends: [emulator, live]
+runners: [python]
+
+fault_injection:
+  proxy: cosmos
+
+fixture:
+  database: "auto"
+  container:
+    id: "orders"
+    partition_key: "/customerId"
+
+timeline:
+  - after: seed
+    event: net_reset
+    args: {}
+  - after: read_during_reset
+    event: reset_faults
+
+steps:
+  - id: seed
+    action: create_item
+    params: { item: { id: "o1", customerId: "cust-1", status: "active" } }
+    expect: [ { type: ok } ]
+
+  - id: read_during_reset
+    action: read_item
+    params: { id: "o1", partition_key: "cust-1" }
+    expect:
+      - { type: retry_count_gte, name: retried_after_reset, value: 1 }
+
+  - id: read_after_clear
+    action: read_item
+    params: { id: "o1", partition_key: "cust-1" }
+    expect:
+      - { type: eventually_ok, name: recovers_after_reset }
+      - { type: field_equals, name: right_item, path: item.id, value: "o1" }

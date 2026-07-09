@@ -1,0 +1,47 @@
+id: "T-304"
+phase: 6
+section: "6.4"
+title: "Bandwidth throttle during a large query drain loses no data"
+description: |
+  A bandwidth toxic squeezes the upstream to a low rate while the SDK drains a
+  multi-page cross-partition query. Slow, chunked delivery of continuation pages
+  must not drop or duplicate items: the drained result set must exactly cover
+  the seeded set. Exercises continuation handling under a constrained pipe.
+
+  Transport-level fault: requires the emulator + Toxiproxy stack. Not runnable
+  in the offline mock tier.
+tags: [fault-injection, transport, bandwidth, pagination, query, toxiproxy]
+backends: [emulator, live]
+runners: [python]
+
+fault_injection:
+  proxy: cosmos
+
+fixture:
+  database: "auto"
+  container:
+    id: "orders"
+    partition_key: "/customerId"
+
+timeline:
+  - after: seed
+    event: net_bandwidth
+    args: { rate_kbps: 8 }
+  - after: drain
+    event: reset_faults
+
+steps:
+  - id: seed
+    action: seed_items
+    params:
+      count: 25
+      template: { id: "o{n}", customerId: "cust-{n}", status: "active" }
+    expect: [ { type: ok } ]
+
+  - id: drain
+    action: query_drain
+    params: { query: "SELECT * FROM c", cross_partition: true }
+    expect:
+      - { type: ok, name: drain_ok }
+      # All 25 seeded items returned exactly once despite the throttled pipe.
+      - { type: pages_cover_set, name: no_data_loss, expected_count: 25 }

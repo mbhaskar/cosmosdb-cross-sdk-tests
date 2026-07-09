@@ -1,0 +1,11 @@
+# Adds fixed latency + jitter to every request on the cosmos proxy. Models a
+# congested / cross-region network path. Used by T-302.
+name: latency-spike
+proxy: cosmos
+toxics:
+  - name: latency_down
+    type: latency
+    stream: downstream
+    attributes:
+      latency: 800      # ms added to each response
+      jitter: 200       # +/- ms

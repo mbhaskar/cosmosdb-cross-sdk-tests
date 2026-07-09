@@ -1,0 +1,10 @@
+# Resets the TCP connection mid-flight (simulates an abrupt server/network drop).
+# Used by T-303 to probe reconnect + write-idempotency behavior.
+name: reset-peer
+proxy: cosmos
+toxics:
+  - name: rst
+    type: reset_peer
+    stream: downstream
+    attributes:
+      timeout: 0        # ms to wait before sending RST (0 = immediately)

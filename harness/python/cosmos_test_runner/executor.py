@@ -20,6 +20,26 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+def _parse_duration(spec: Any) -> "float | None":
+    """Parse a loop duration like '30s', '500ms', '2m' into seconds. Returns None
+    when not provided."""
+    if spec is None:
+        return None
+    if isinstance(spec, (int, float)):
+        return float(spec)
+    s = str(spec).strip().lower()
+    try:
+        if s.endswith("ms"):
+            return float(s[:-2]) / 1000.0
+        if s.endswith("s"):
+            return float(s[:-1])
+        if s.endswith("m"):
+            return float(s[:-1]) * 60.0
+        return float(s)
+    except ValueError:
+        return None
+
+
 def _resolved_sdk_version():
     """The actual azure-cosmos version installed in this interpreter (not the
     label the caller passed). None when the SDK isn't installed (e.g. a
@@ -72,6 +92,13 @@ class ScenarioRunner:
         self.config = config
         self.sdk_version = sdk_version
         self.log = log
+        # When a scenario opts into transport-level fault injection and a proxy
+        # endpoint is configured, point the SDK client at Toxiproxy instead of the
+        # backend directly so injected toxics are on the wire.
+        self.fault_injection = scenario.get("fault_injection")
+        if self.fault_injection and config.get("backend") != "mock" and config.get("proxy_endpoint"):
+            config = {**config, "endpoint": config["proxy_endpoint"]}
+            self.config = config
         self.backend = make_backend(config)
         self.run_id = config.get("run_id", uuid.uuid4().hex[:8])
         self.ctx: Dict[str, Any] = {
@@ -85,18 +112,43 @@ class ScenarioRunner:
         self.logs: List[str] = []
         # metrics captured after each step id, for span assertions (metric_delta).
         self.metric_snapshots: Dict[str, Dict[str, Any]] = {}
+        # latency (ms) and resource samples keyed by scope (loop id) for
+        # latency_percentile / resource_stable assertions.
+        self.latency_samples: Dict[str, List[float]] = {}
+        self.resource_samples: Dict[str, List[float]] = {}
         # timeline events grouped by (when, step_id).
         self.timeline = self._index_timeline(scenario.get("timeline", []))
+        # Lazily-built Toxiproxy controller for net_* / region_* timeline verbs.
+        self.fault_controller = self._make_fault_controller()
+
+    def _make_fault_controller(self):
+        if not self.fault_injection or self.config.get("backend") == "mock":
+            return None
+        try:
+            from .faults import ProxyFaultController
+        except Exception:  # noqa: BLE001
+            return None
+        fi = self.fault_injection if isinstance(self.fault_injection, dict) else {}
+        return ProxyFaultController(
+            admin_url=self.config.get("toxiproxy_url"),
+            proxy=fi.get("proxy", "cosmos"),
+            secondary_proxy=fi.get("secondary_proxy", "cosmos-secondary"),
+        )
 
     def _log(self, msg: str) -> None:
         line = f"[{_now_iso()}] {msg}"
         self.logs.append(line)
         self.log(line)
 
-    def _run_step(self, step: Dict[str, Any]) -> OpResult:
+    def _run_step(self, step: Dict[str, Any], scope: str = None,
+                  evaluate: bool = True) -> OpResult:
         action = step["action"]
         params = _resolve(step.get("params", {}), self.ctx)
+        t_step = time.time()
         result = execute_action(self.backend, action, params, self.ctx)
+        elapsed_ms = (time.time() - t_step) * 1000.0
+        if scope:
+            self.latency_samples.setdefault(scope, []).append(elapsed_ms)
         if step.get("id"):
             self.ctx["steps"][step["id"]] = {
                 "ok": result.ok,
@@ -123,12 +175,46 @@ class ScenarioRunner:
                 "text": json.dumps(result.diagnostics, indent=2),
             })
 
-        for outc in assertions.evaluate(step.get("expect", []), result, self.backend, self.metric_snapshots):
-            outc["step"] = step.get("id", action)
+        if evaluate:
+            self._evaluate(step, result)
+        return result
+
+    def _evaluate(self, step: Dict[str, Any], result: OpResult, scope: str = None) -> None:
+        ctx = {"latency": self.latency_samples, "resource": self.resource_samples, "scope": scope}
+        for outc in assertions.evaluate(step.get("expect", []), result, self.backend,
+                                        self.metric_snapshots, ctx):
+            outc["step"] = step.get("id", step.get("action"))
             self.assertion_results.append(outc)
             status = "PASS" if outc["passed"] else "FAIL"
             self._log(f"  assert {outc['name']}: {status} {outc['detail']}")
-        return result
+
+    def _run_loop(self, step: Dict[str, Any]) -> None:
+        """Repeat nested steps count times or for a duration. Records per-iteration
+        latency + resource samples under the loop's scope, then evaluates the
+        loop's own expect (e.g. latency_percentile / resource_stable)."""
+        scope = step.get("id", "loop")
+        inner = step.get("steps", [])
+        count = step.get("count")
+        duration = _parse_duration(step.get("duration"))
+        last: OpResult = OpResult(ok=True)
+        started = time.time()
+        i = 0
+        while True:
+            if count is not None and i >= int(count):
+                break
+            if duration is not None and (time.time() - started) >= duration:
+                break
+            if count is None and duration is None:
+                break
+            for sub in inner:
+                last = self._run_step(sub, scope=scope, evaluate=True)
+            # Sample a cheap resource signal per iteration (connection count is a
+            # good "no connection storm / no leak" proxy in gateway mode).
+            self.resource_samples.setdefault(scope, []).append(
+                float(self.backend.metrics.as_dict().get("connections_opened", 0)))
+            i += 1
+        self._log(f"loop '{scope}' ran {i} iteration(s)")
+        self._evaluate(step, last, scope=scope)
 
     def run(self) -> Dict[str, Any]:
         started_at = _now_iso()
@@ -145,7 +231,10 @@ class ScenarioRunner:
             for step in self.scenario.get("steps", []):
                 sid = step.get("id")
                 self._fire_events("before", sid)
-                self._run_step(step)
+                if step.get("action") == "loop":
+                    self._run_loop(step)
+                else:
+                    self._run_step(step)
                 self._fire_events("after", sid)
             if any(not a["passed"] for a in self.assertion_results):
                 status = "fail"
@@ -154,6 +243,11 @@ class ScenarioRunner:
             error = f"{type(exc).__name__}: {exc}"
             self._log(f"ERROR {error}")
         finally:
+            if self.fault_controller is not None:
+                try:
+                    self.fault_controller.reset()
+                except Exception as exc:  # noqa: BLE001
+                    self._log(f"fault reset warning: {exc}")
             self._teardown_fixture(fixture)
 
         duration_ms = int((time.time() - t0) * 1000)
@@ -189,12 +283,24 @@ class ScenarioRunner:
             idx.setdefault((when, anchor), []).append(ev)
         return idx
 
+    _TRANSPORT_EVENTS = {"net_latency", "net_timeout", "net_reset", "net_bandwidth",
+                         "net_slow_close", "region_down", "region_up", "reset_faults"}
+
     def _fire_events(self, when: str, step_id) -> None:
         if not step_id:
             return
         for ev in self.timeline.get((when, step_id), []):
             event = ev["event"]
             args = ev.get("args", {})
+            # Transport faults (Toxiproxy) vs mock control-plane faults.
+            if event in self._TRANSPORT_EVENTS:
+                if self.fault_controller is None:
+                    self._log(f"  timeline[{when} {step_id}]: '{event}' skipped "
+                              f"(no fault controller; needs emulator/live + Toxiproxy)")
+                    continue
+                self.fault_controller.apply(event, args)
+                self._log(f"  timeline[{when} {step_id}]: {event} {args or ''}")
+                continue
             if not hasattr(self.backend, "control_event"):
                 self._log(f"  timeline: backend ignores control event '{event}'")
                 continue

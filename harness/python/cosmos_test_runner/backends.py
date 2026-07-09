@@ -100,6 +100,30 @@ class Backend:
     def query_items(self, db_id: str, container_id: str, query: str, parameters=None, partition_key=None, cross_partition=False, **kwargs) -> OpResult:
         raise NotImplementedError
 
+    def seed_items(self, db_id: str, container_id: str, count: int, template: Dict[str, Any], **kwargs) -> OpResult:
+        """Bulk-seed ``count`` items by expanding ``{n}`` in string template
+        values (n = 1..count). Implemented once here over ``create_item`` so it
+        works identically on every backend. Returns a single aggregate result
+        (ok only if every insert succeeded)."""
+        created: List[Dict[str, Any]] = []
+        all_ok = True
+        last: Optional[OpResult] = None
+        for n in range(1, int(count) + 1):
+            item = {
+                k: (v.replace("{n}", str(n)) if isinstance(v, str) else v)
+                for k, v in template.items()
+            }
+            last = self.create_item(db_id, container_id, item)
+            all_ok = all_ok and last.ok
+            if last.ok and last.item is not None:
+                created.append(last.item)
+        return OpResult(
+            ok=all_ok,
+            status_code=last.status_code if last else 0,
+            items=created,
+            ru=0.0,
+        )
+
     def delete_database(self, db_id: str, **kwargs) -> OpResult:
         raise NotImplementedError
 

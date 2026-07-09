@@ -1,0 +1,52 @@
+id: "T-302"
+phase: 6
+section: "6.2"
+title: "Latency spike keeps tail latency bounded and connections stable under load"
+description: |
+  A latency toxic adds a fixed delay to every upstream packet while a steady
+  read loop runs. Verifies (a) the SDK's p99 latency stays under an SLA ceiling
+  despite the injected delay (retries/pipelining don't compound), and (b) the
+  connection pool is stable across the loop (no connection storm or leak while
+  requests are slow).
+
+  Transport-level fault: requires the emulator + Toxiproxy stack. Not runnable
+  in the offline mock tier.
+tags: [fault-injection, transport, latency, load, toxiproxy]
+backends: [emulator, live]
+runners: [python]
+
+fault_injection:
+  proxy: cosmos
+
+fixture:
+  database: "auto"
+  container:
+    id: "orders"
+    partition_key: "/customerId"
+
+timeline:
+  - after: seed
+    event: net_latency
+    args: { latency_ms: 150, jitter_ms: 50 }
+  - after: steady_load
+    event: reset_faults
+
+steps:
+  - id: seed
+    action: create_item
+    params: { item: { id: "o1", customerId: "cust-1", status: "active" } }
+    expect: [ { type: ok } ]
+
+  - id: steady_load
+    action: loop
+    count: 20
+    steps:
+      - id: read
+        action: read_item
+        params: { id: "o1", partition_key: "cust-1" }
+        expect: [ { type: ok } ]
+    expect:
+      # Under a 150ms injected delay, p99 should stay well under a 2s SLA ceiling.
+      - { type: latency_percentile, name: p99_bounded, percentile: 99, max_ms: 2000 }
+      # Connections opened should not balloon across the loop (pool reuse).
+      - { type: resource_stable, name: pool_stable, metric: connections_opened, tolerance_pct: 25 }

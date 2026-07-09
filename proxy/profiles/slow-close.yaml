@@ -1,0 +1,10 @@
+# Delays connection close, leaving sockets in a half-open state to stress the
+# SDK's connection pool over a soak loop. Used by T-306.
+name: slow-close
+proxy: cosmos
+toxics:
+  - name: lingering_close
+    type: slow_close
+    stream: downstream
+    attributes:
+      delay: 2000       # ms delay before the connection actually closes

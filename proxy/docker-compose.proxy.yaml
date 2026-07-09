@@ -1,0 +1,48 @@
+# Toxiproxy + Cosmos DB emulator stack for transport-level fault injection.
+#
+# Brings up the Linux Cosmos DB emulator with a Toxiproxy instance in front of
+# it. SDK runners point their endpoint at Toxiproxy (:18081); the orchestrator
+# (or the harness ProxyFaultController) drives toxics via the admin API (:8474).
+#
+#   docker compose -f proxy/docker-compose.proxy.yaml up -d
+#   python proxy/bootstrap.py            # register the 'cosmos' proxy route
+#
+# Then run fault-injection scenarios against the proxy endpoint, e.g.:
+#   COSMOS_ENDPOINT=https://localhost:18081 COSMOS_KEY=<emulator-key> \
+#   TOXIPROXY_URL=http://localhost:8474 \
+#   python scripts/run-matrix.py --backend emulator --specs specs/phase06-fault-injection
+#
+# NOTE: requires Docker. Not runnable in the offline mock environment; this stack
+# is intended for the CI fault-injection job.
+
+services:
+  cosmos-emulator:
+    image: mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:latest
+    container_name: cosmos-emulator
+    mem_limit: 3g
+    cpu_count: 2
+    environment:
+      - AZURE_COSMOS_EMULATOR_PARTITION_COUNT=10
+      - AZURE_COSMOS_EMULATOR_ENABLE_DATA_PERSISTENCE=false
+    ports:
+      - "8081:8081"
+      - "10251-10255:10251-10255"
+    healthcheck:
+      test: ["CMD", "curl", "-ksf", "https://localhost:8081/_explorer/emulator.pem"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    container_name: toxiproxy
+    depends_on:
+      cosmos-emulator:
+        condition: service_healthy
+    ports:
+      - "8474:8474"     # admin/control API
+      - "18081:18081"   # 'cosmos' proxy listen (primary region)
+      - "18082:18082"   # 'cosmos-secondary' proxy listen (multi-region tests)
+    command: ["-host", "0.0.0.0", "-config", "/config/toxiproxy.json"]
+    volumes:
+      - ./toxiproxy.json:/config/toxiproxy.json:ro
