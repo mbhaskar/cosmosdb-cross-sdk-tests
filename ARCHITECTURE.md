@@ -1266,12 +1266,12 @@ stages:
           vmImage: "ubuntu-latest"
         steps:
           - script: |
-              # Start CosmosDB Emulator (Linux container)
+              # Start CosmosDB Emulator (vNext Linux container; multi-arch,
+              # gateway-only, HTTPS via --protocol https, health probe on :8080)
               docker run -d --name cosmos-emulator \
-                -p 8081:8081 -p 10251-10254:10251-10254 \
-                -e AZURE_COSMOS_EMULATOR_PARTITION_COUNT=50 \
-                -e AZURE_COSMOS_EMULATOR_ENABLE_DATA_PERSISTENCE=false \
-                mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:latest
+                -p 8081:8081 -p 8080:8080 -p 1234:1234 \
+                mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:vnext-latest \
+                --protocol https
               
               # Start Toxiproxy
               docker run -d --name toxiproxy \

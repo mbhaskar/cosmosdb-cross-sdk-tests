@@ -38,19 +38,23 @@ case "$CMD" in
     echo "==> Starting fault-injection stack (emulator + toxiproxy + mitmproxy)"
     "${DC[@]}" -f "$COMPOSE" up -d
     echo
-    echo "==> Waiting for the Cosmos emulator health check (first boot ~1-2 min)..."
+    echo "==> Waiting for the Cosmos emulator to report ready (vNext boots in ~20-40s)..."
     for i in $(seq 1 60); do
       state="$(docker inspect -f '{{.State.Health.Status}}' cosmos-emulator 2>/dev/null || echo unknown)"
       if [ "$state" = "healthy" ]; then echo "    emulator healthy"; break; fi
-      sleep 5
-      if [ "$i" = "60" ]; then echo "    WARN: emulator not healthy yet; check 'run-fault-stack.sh logs'"; fi
+      # Belt-and-suspenders: also probe the readiness endpoint from the host.
+      if curl -sf http://localhost:8080/ready >/dev/null 2>&1; then echo "    emulator ready"; break; fi
+      sleep 3
+      if [ "$i" = "60" ]; then echo "    WARN: emulator not ready yet; check 'run-fault-stack.sh logs'"; fi
     done
     echo
     echo "==> Endpoints"
     echo "    SDK (L7+L4 chain):  https://localhost:18091   (mitmproxy)"
     echo "    SDK (L4 only):      https://localhost:18081   (toxiproxy 'cosmos')"
     echo "    Toxiproxy admin:    http://localhost:8474"
-    echo "    Emulator direct:    https://localhost:8081"
+    echo "    Emulator direct:    https://localhost:8081    (gateway, HTTPS)"
+    echo "    Emulator health:    http://localhost:8080/ready"
+    echo "    Data Explorer:      http://localhost:1234"
     echo
     echo "    Now run T-3xx from the portal (emulator backend, Python runner) or:"
     echo "      python scripts/run-matrix.py --backend emulator \\"

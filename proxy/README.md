@@ -63,10 +63,23 @@ chain (`proxy_endpoint` → Toxiproxy :18081, `mitm_endpoint` → mitmproxy :180
 and the runner picks Toxiproxy vs mitmproxy per scenario automatically. If you
 see `cannot reach Toxiproxy at ...`, the stack isn't up — run `run-fault-stack.sh up`.
 
-⚠️ **Apple Silicon:** the Linux Cosmos emulator image is x86 and runs under
-emulation on M-series Macs — it can be slow/flaky. If it misbehaves, target a
-real Cosmos account with `--backend live` instead of the emulator; the proxy
-chain is identical.
+### About the emulator image (vNext)
+
+The stack uses the **vNext Linux emulator**
+(`mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:vnext-latest`), which is
+**multi-arch and runs natively on Apple Silicon** — no x86 emulation, so it's far
+faster and more reliable than the legacy image. Notes specific to vNext:
+
+- **Gateway mode only.** All scenarios run against the gateway endpoint; the
+  harness already drives the Python SDK in gateway mode.
+- **HTTP by default → we force HTTPS.** The compose file starts it with
+  `--protocol https` so the whole proxy chain stays on TLS (the .NET/Java SDKs
+  require HTTPS against the emulator). The SDK skips verification of the emulator's
+  self-signed cert automatically.
+- **Ports:** `8081` gateway (HTTPS), `8080` health probe (`/alive`, `/ready`,
+  `/status` — always HTTP), `1234` Data Explorer UI.
+- **Feature subset.** vNext supports a subset of Cosmos features; the T-3xx
+  scenarios stick to CRUD + query, which are supported.
 
 ## Run the fault scenarios from the CLI
 
@@ -74,11 +87,6 @@ You can also run them without the portal. The emulator backend auto-resolves the
 proxy endpoints from `config/default.yaml`, so no env vars are strictly required;
 override per-run with `COSMOS_PROXY_ENDPOINT` / `MITM_ENDPOINT` / `TOXIPROXY_URL`
 if your ports differ.
-
-⚠️ **Apple Silicon:** the Linux Cosmos emulator image is x86 and runs under
-emulation on M-series Macs — it can be slow/flaky. If it misbehaves, target a
-real Cosmos account with `--backend live` instead of the emulator; the proxy
-chain is identical.
 
 ## Run the fault scenarios
 

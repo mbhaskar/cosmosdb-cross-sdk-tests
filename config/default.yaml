@@ -9,6 +9,10 @@ consistency: Session
 
 # Used when backend != mock. Values can also be supplied per-run via the API.
 emulator:
+  # vNext Linux emulator (multi-arch; runs natively on Apple Silicon). It is
+  # gateway-mode only and is started with `--protocol https` by the fault stack,
+  # so the endpoint stays HTTPS. The SDK skips TLS verification for the emulator's
+  # self-signed cert automatically (see harness make_backend / tls_verify).
   endpoint: "https://localhost:8081"
   # Well-known Cosmos DB emulator master key (public, non-secret):
   key: "C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw=="

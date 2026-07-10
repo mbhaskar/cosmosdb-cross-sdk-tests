@@ -1,8 +1,9 @@
 # Toxiproxy + Cosmos DB emulator stack for transport-level fault injection.
 #
-# Brings up the Linux Cosmos DB emulator with a Toxiproxy instance in front of
-# it. SDK runners point their endpoint at Toxiproxy (:18081); the orchestrator
-# (or the harness ProxyFaultController) drives toxics via the admin API (:8474).
+# Brings up the Linux Cosmos DB emulator (vNext, multi-arch — runs natively on
+# Apple Silicon) with a Toxiproxy instance in front of it. SDK runners point
+# their endpoint at Toxiproxy (:18081); the orchestrator (or the harness
+# ProxyFaultController) drives toxics via the admin API (:8474).
 #
 #   docker compose -f proxy/docker-compose.proxy.yaml up -d
 #   python proxy/bootstrap.py            # register the 'cosmos' proxy route
@@ -13,25 +14,31 @@
 #   python scripts/run-matrix.py --backend emulator --specs specs/phase06-fault-injection
 #
 # NOTE: requires Docker. Not runnable in the offline mock environment; this stack
-# is intended for the CI fault-injection job.
+# is intended for the CI fault-injection job (or a local Docker install).
 
 services:
   cosmos-emulator:
-    image: mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:latest
+    # vNext Linux emulator: multi-arch (amd64 + arm64), so it runs natively on
+    # Apple Silicon Macs. Gateway mode only; HTTP by default, so we start it with
+    # `--protocol https` to keep the whole proxy chain on TLS. The .NET/Java SDKs
+    # require HTTPS against the emulator.
+    image: mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:vnext-latest
     container_name: cosmos-emulator
     mem_limit: 3g
     cpu_count: 2
-    environment:
-      - AZURE_COSMOS_EMULATOR_PARTITION_COUNT=10
-      - AZURE_COSMOS_EMULATOR_ENABLE_DATA_PERSISTENCE=false
+    command: ["--protocol", "https"]
     ports:
-      - "8081:8081"
-      - "10251-10255:10251-10255"
+      - "8081:8081"     # gateway endpoint (HTTPS)
+      - "8080:8080"     # health probe (/alive, /ready, /status) — always HTTP
+      - "1234:1234"     # Data Explorer UI
     healthcheck:
-      test: ["CMD", "curl", "-ksf", "https://localhost:8081/_explorer/emulator.pem"]
+      # The image ships bash (its entrypoint is /bin/bash). Prefer the readiness
+      # probe on :8080; fall back to a raw TCP connect to the gateway.
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/ready >/dev/null 2>&1 || bash -c 'exec 3<>/dev/tcp/localhost/8081' >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 30
+      start_period: 30s
 
   toxiproxy:
     image: ghcr.io/shopify/toxiproxy:2.9.0

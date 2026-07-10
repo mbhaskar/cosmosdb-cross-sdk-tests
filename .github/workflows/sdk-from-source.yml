@@ -147,19 +147,26 @@ jobs:
       - name: Start Cosmos emulator
         if: ${{ env.BACKEND == 'emulator' }}
         run: |
+          # vNext Linux emulator (multi-arch, gateway-only). Force HTTPS via
+          # --protocol https; health probe is on :8080.
           docker run -d --name cosmos-emulator \
-            -p 8081:8081 -p 10251:10251 -p 10252:10252 -p 10253:10253 -p 10254:10254 \
-            mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:latest
+            -p 8081:8081 -p 8080:8080 \
+            mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:vnext-latest \
+            --protocol https
 
       - name: Wait for emulator + trust certificate
         if: ${{ env.BACKEND == 'emulator' }}
         run: |
           set -e
           for i in $(seq 1 60); do
-            if curl -ksf https://localhost:8081/_explorer/emulator.pem -o /tmp/cosmos.crt; then break; fi
-            sleep 5
+            if curl -sf http://localhost:8080/ready >/dev/null 2>&1; then break; fi
+            sleep 3
           done
-          test -s /tmp/cosmos.crt || { echo "Emulator never became ready"; exit 1; }
+          curl -sf http://localhost:8080/ready >/dev/null 2>&1 || { echo "Emulator never became ready"; exit 1; }
+          # vNext has no /_explorer/emulator.pem; export the cert with openssl.
+          openssl s_client -connect localhost:8081 -servername localhost </dev/null 2>/dev/null \
+            | openssl x509 -outform PEM > /tmp/cosmos.crt
+          test -s /tmp/cosmos.crt || { echo "Could not extract emulator cert"; exit 1; }
           sudo cp /tmp/cosmos.crt /usr/local/share/ca-certificates/cosmos.crt
           sudo update-ca-certificates
           if [ "$LANGUAGE" = "java" ]; then

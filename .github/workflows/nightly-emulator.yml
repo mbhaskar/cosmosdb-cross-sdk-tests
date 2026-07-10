@@ -27,16 +27,14 @@ jobs:
       DIVERGENCE: ${{ github.event.inputs.divergence_check || 'true' }}
     services:
       cosmos:
-        image: mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:latest
+        # vNext Linux emulator: multi-arch, gateway-mode only. HTTP by default, so
+        # force HTTPS via the PROTOCOL env var to match the SDKs' requirements.
+        image: mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:vnext-latest
         ports:
-          - 8081:8081
-          - 10251:10251
-          - 10252:10252
-          - 10253:10253
-          - 10254:10254
+          - 8081:8081     # gateway (HTTPS)
+          - 8080:8080     # health probe (/ready) — HTTP
         env:
-          AZURE_COSMOS_EMULATOR_PARTITION_COUNT: "3"
-          AZURE_COSMOS_EMULATOR_ENABLE_DATA_PERSISTENCE: "false"
+          PROTOCOL: https
     steps:
       - uses: actions/checkout@v4
 
@@ -64,21 +62,26 @@ jobs:
         if: ${{ env.LANGUAGES != 'python' }}
         run: cd harness/java && mvn -q -DskipTests package
 
-      # The emulator ships a self-signed cert and takes a while to become
-      # healthy. Poll its endpoint, then trust the cert for both SDKs.
+      # vNext exposes a health probe on :8080. Poll it for readiness, then export
+      # the emulator's self-signed cert (via openssl, since vNext has no
+      # /_explorer/emulator.pem endpoint) and trust it for the Java SDK. The Python
+      # SDK skips verification for the emulator automatically.
       - name: Wait for emulator + trust certificate
         run: |
           set -e
-          echo "Waiting for emulator to accept connections..."
+          echo "Waiting for emulator readiness probe..."
           for i in $(seq 1 60); do
-            if curl -ksf https://localhost:8081/_explorer/emulator.pem -o /tmp/cosmos.crt; then
-              echo "Emulator is up."
+            if curl -sf http://localhost:8080/ready >/dev/null 2>&1; then
+              echo "Emulator is ready."
               break
             fi
-            sleep 5
+            sleep 3
           done
-          test -s /tmp/cosmos.crt || { echo "Emulator never became ready"; exit 1; }
-          # Trust the cert for the JVM (Java SDK) and the OS store (Python SDK).
+          curl -sf http://localhost:8080/ready >/dev/null 2>&1 || { echo "Emulator never became ready"; exit 1; }
+          # Export the gateway's TLS cert and trust it for the JVM + OS store.
+          openssl s_client -connect localhost:8081 -servername localhost </dev/null 2>/dev/null \
+            | openssl x509 -outform PEM > /tmp/cosmos.crt
+          test -s /tmp/cosmos.crt || { echo "Could not extract emulator cert"; exit 1; }
           sudo cp /tmp/cosmos.crt /usr/local/share/ca-certificates/cosmos.crt
           sudo update-ca-certificates
           KEYTOOL="$JAVA_HOME/bin/keytool"

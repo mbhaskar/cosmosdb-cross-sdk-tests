@@ -486,9 +486,10 @@ def _apply_query(query: str, rows: List[Dict[str, Any]], parameters: List[Dict[s
 class SdkBackend(Backend):
     """Drives the real azure-cosmos SDK (emulator or live account)."""
 
-    def __init__(self, endpoint: str, key: str) -> None:
+    def __init__(self, endpoint: str, key: str, verify_tls: bool = True) -> None:
         self.endpoint = endpoint
         self.key = key
+        self.verify_tls = verify_tls
         self.metrics = Metrics()
         self._client = None
         self._connection_mode = "gateway"
@@ -530,7 +531,13 @@ class SdkBackend(Backend):
             self._connection_mode = connection_mode
             self.metrics.connection_mode = connection_mode
             # The Python SDK is gateway-mode; connection_mode kept for parity/metrics.
-            self._client = CosmosClient(self.endpoint, credential=self.key)
+            # The emulator (and the local Toxiproxy/mitmproxy chain in front of it)
+            # serves a self-signed certificate, so TLS verification is disabled for
+            # those targets. Live accounts keep verification on.
+            client_kwargs = {}
+            if not self.verify_tls:
+                client_kwargs["connection_verify"] = False
+            self._client = CosmosClient(self.endpoint, credential=self.key, **client_kwargs)
             self.metrics.connections_opened = 1
             self.metrics.metadata_calls["get_database_account"] += 1
             return OpResult(ok=True, status_code=200)
@@ -683,4 +690,11 @@ def make_backend(config: Dict[str, Any]) -> Backend:
     key = config.get("key")
     if not endpoint or not key:
         raise ValueError(f"backend '{backend}' requires endpoint and key in config")
-    return SdkBackend(endpoint, key)
+    # The emulator serves a self-signed cert; so does the local proxy chain when a
+    # scenario routes through Toxiproxy/mitmproxy. Skip TLS verification for those.
+    # Live accounts verify by default; override with config['tls_verify'] if a live
+    # account is itself fronted by the local proxy.
+    tls_verify = config.get("tls_verify")
+    if tls_verify is None:
+        tls_verify = not (backend == "emulator" or config.get("proxy_endpoint"))
+    return SdkBackend(endpoint, key, verify_tls=bool(tls_verify))
