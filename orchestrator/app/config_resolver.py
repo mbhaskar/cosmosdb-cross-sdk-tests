@@ -43,7 +43,6 @@ def load_defaults(path: str) -> Dict[str, Any]:
         out[backend] = {k: _expand_env(v) for k, v in block.items()}
     return out
 
-
 def _first_nonempty(*values: Optional[str]) -> Optional[str]:
     for v in values:
         if v:
@@ -74,6 +73,26 @@ def resolve(config: Dict[str, Any], defaults: Dict[str, Any]) -> Tuple[Optional[
     resolved = dict(config)
     resolved["endpoint"] = endpoint
     resolved["key"] = key
+
+    # Fault-injection proxy wiring (optional). Only relevant for T-3xx scenarios;
+    # resolved config > env > default.yaml block. Left unset when not configured,
+    # in which case the executor talks to the backend directly and the fault
+    # controllers fall back to their own localhost defaults.
+    proxy_endpoint = _first_nonempty(
+        config.get("proxy_endpoint"), os.environ.get("COSMOS_PROXY_ENDPOINT"),
+        block.get("proxy_endpoint"))
+    toxiproxy_url = _first_nonempty(
+        config.get("toxiproxy_url"), os.environ.get("TOXIPROXY_URL"),
+        block.get("toxiproxy_url"))
+    mitm_endpoint = _first_nonempty(
+        config.get("mitm_endpoint"), os.environ.get("MITM_ENDPOINT"),
+        block.get("mitm_endpoint"))
+    if proxy_endpoint:
+        resolved["proxy_endpoint"] = proxy_endpoint
+    if toxiproxy_url:
+        resolved["toxiproxy_url"] = toxiproxy_url
+    if mitm_endpoint:
+        resolved["mitm_endpoint"] = mitm_endpoint
     return resolved, None
 
 

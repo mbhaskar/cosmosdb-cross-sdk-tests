@@ -43,11 +43,37 @@ SDK runner ─▶ mitmproxy (:18091, L7 429 window) ─▶ Toxiproxy (:18081, L4
 
 ## Bring the stack up
 
+The portal (`scripts/run-mvp.sh`) does **not** start this stack — it only serves
+the dashboard and runs the mock (no-infra) scenarios. The T-3xx fault scenarios
+need the Docker stack, started separately with the helper script:
+
 ```bash
-docker compose -f proxy/docker-compose.proxy.yaml up -d
-# wait for the emulator health check to go healthy (~1-2 min on first boot)
-docker compose -f proxy/docker-compose.proxy.yaml ps
+scripts/run-fault-stack.sh up       # emulator + toxiproxy + mitmproxy
+scripts/run-fault-stack.sh status    # container + Toxiproxy health
+scripts/run-fault-stack.sh logs      # tail logs
+scripts/run-fault-stack.sh down      # tear it all down
 ```
+
+(Equivalent to `docker compose -f proxy/docker-compose.proxy.yaml up -d`, plus a
+health-wait and an endpoint summary.)
+
+Once it's up, you can run T-3xx **straight from the portal** — no env vars
+needed. `config/default.yaml` already points the emulator backend at the proxy
+chain (`proxy_endpoint` → Toxiproxy :18081, `mitm_endpoint` → mitmproxy :18091),
+and the runner picks Toxiproxy vs mitmproxy per scenario automatically. If you
+see `cannot reach Toxiproxy at ...`, the stack isn't up — run `run-fault-stack.sh up`.
+
+⚠️ **Apple Silicon:** the Linux Cosmos emulator image is x86 and runs under
+emulation on M-series Macs — it can be slow/flaky. If it misbehaves, target a
+real Cosmos account with `--backend live` instead of the emulator; the proxy
+chain is identical.
+
+## Run the fault scenarios from the CLI
+
+You can also run them without the portal. The emulator backend auto-resolves the
+proxy endpoints from `config/default.yaml`, so no env vars are strictly required;
+override per-run with `COSMOS_PROXY_ENDPOINT` / `MITM_ENDPOINT` / `TOXIPROXY_URL`
+if your ports differ.
 
 ⚠️ **Apple Silicon:** the Linux Cosmos emulator image is x86 and runs under
 emulation on M-series Macs — it can be slow/flaky. If it misbehaves, target a

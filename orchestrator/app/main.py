@@ -53,6 +53,10 @@ class RunConfig(BaseModel):
     consistency: str = "Session"
     endpoint: Optional[str] = None
     key: Optional[str] = None
+    # Fault-injection proxy wiring (optional; T-3xx scenarios only).
+    proxy_endpoint: Optional[str] = None
+    toxiproxy_url: Optional[str] = None
+    mitm_endpoint: Optional[str] = None
 
 
 class RunRequest(BaseModel):

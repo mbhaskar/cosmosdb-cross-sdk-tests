@@ -96,9 +96,19 @@ class ScenarioRunner:
         # endpoint is configured, point the SDK client at Toxiproxy instead of the
         # backend directly so injected toxics are on the wire.
         self.fault_injection = scenario.get("fault_injection")
-        if self.fault_injection and config.get("backend") != "mock" and config.get("proxy_endpoint"):
-            config = {**config, "endpoint": config["proxy_endpoint"]}
-            self.config = config
+        fi = self.fault_injection if isinstance(self.fault_injection, dict) else {}
+        # Route the SDK client through the proxy chain when a scenario opts into
+        # fault injection. For L7 (protocol / mitmproxy) scenarios, prefer the
+        # mitm endpoint, which fronts Toxiproxy so both tiers apply; otherwise use
+        # the Toxiproxy endpoint. No-op when nothing is configured (talks direct).
+        if self.fault_injection and config.get("backend") != "mock":
+            if fi.get("protocol"):
+                proxy_ep = config.get("mitm_endpoint") or config.get("proxy_endpoint")
+            else:
+                proxy_ep = config.get("proxy_endpoint")
+            if proxy_ep:
+                config = {**config, "endpoint": proxy_ep}
+                self.config = config
         self.backend = make_backend(config)
         self.run_id = config.get("run_id", uuid.uuid4().hex[:8])
         self.ctx: Dict[str, Any] = {
