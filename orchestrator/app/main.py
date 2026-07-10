@@ -182,7 +182,18 @@ def _execute_run(run_id: str, scenario_ids: List[str], sdks: List[Dict], config:
         for sdk in sdks:
             # Skip scenarios that don't support the selected backend.
             if backend not in scenario.get("backends", ["mock"]):
-                store.save_result(run_id, _skipped(scenario, sdk, backend))
+                store.save_result(run_id, _skipped(
+                    scenario, sdk, backend,
+                    f"scenario does not support backend '{backend}'"))
+                continue
+            # Skip scenarios gated to specific SDK runners the selected SDK is not
+            # part of (e.g. control-plane / fault-injection scenarios the Java
+            # runner does not implement yet). Mirrors scripts/run-matrix.py.
+            allowed_runners = scenario.get("runners")
+            if allowed_runners and sdk["name"] not in allowed_runners:
+                store.save_result(run_id, _skipped(
+                    scenario, sdk, backend,
+                    f"scenario limited to runners {allowed_runners}"))
                 continue
             jobs.append((scenario, sdk))
 
@@ -209,7 +220,8 @@ def _execute_run(run_id: str, scenario_ids: List[str], sdks: List[Dict], config:
     store.finish_run(run_id, overall, summary)
 
 
-def _skipped(scenario: Dict, sdk: Dict, backend: str) -> Dict[str, Any]:
+def _skipped(scenario: Dict, sdk: Dict, backend: str, reason: str = None) -> Dict[str, Any]:
+    reason = reason or f"scenario does not support backend '{backend}'"
     return {
         "scenario_id": str(scenario["id"]),
         "title": scenario.get("title"),
@@ -221,7 +233,7 @@ def _skipped(scenario: Dict, sdk: Dict, backend: str) -> Dict[str, Any]:
         "metrics": {},
         "assertions": [],
         "error": None,
-        "logs": [f"scenario does not support backend '{backend}'"],
+        "logs": [reason],
     }
 
 
