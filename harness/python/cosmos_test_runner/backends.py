@@ -483,6 +483,55 @@ def _apply_query(query: str, rows: List[Dict[str, Any]], parameters: List[Dict[s
 # --------------------------------------------------------------------------- #
 
 
+class _CountingTransport:
+    """Wraps the azure-core HTTP transport to give the *real* SDK a retry signal.
+
+    The Python SDK retries connection resets / timeouts / throttles internally and
+    does not expose a retry count. Fault-injection assertions such as
+    ``retry_count_gte`` need one, so we count:
+
+      * every transport-level failure (``send`` raises, e.g. a ``reset_peer``
+        toxic surfaces as a ServiceRequestError) — the SDK will retry, and
+      * every retriable *response* status (429/503/449/410) the server returns.
+
+    Each such event increments ``metrics.retries`` live, so no per-op snapshotting
+    is needed. Non-retriable 2xx/4xx responses are ignored, so ordinary multi-call
+    operations do not inflate the count.
+    """
+
+    _RETRIABLE_STATUS = {429, 503, 449, 410}
+
+    def __init__(self, inner, metrics: "Metrics") -> None:
+        self._inner = inner
+        self._metrics = metrics
+
+    # Context-manager + lifecycle passthrough (azure-core drives these).
+    def __enter__(self):
+        self._inner.__enter__()
+        return self
+
+    def __exit__(self, *args):
+        return self._inner.__exit__(*args)
+
+    def open(self):
+        return self._inner.open()
+
+    def close(self):
+        return self._inner.close()
+
+    def send(self, request, **kwargs):
+        try:
+            response = self._inner.send(request, **kwargs)
+        except Exception:
+            # Transport failure (reset/timeout) — the retry policy will re-send.
+            self._metrics.retries += 1
+            raise
+        status = getattr(response, "status_code", None)
+        if status in self._RETRIABLE_STATUS:
+            self._metrics.retries += 1
+        return response
+
+
 class SdkBackend(Backend):
     """Drives the real azure-cosmos SDK (emulator or live account)."""
 
@@ -528,6 +577,7 @@ class SdkBackend(Backend):
     def create_client(self, connection_mode: str, **kwargs) -> OpResult:
         try:
             from azure.cosmos import CosmosClient
+            from azure.core.pipeline.transport import RequestsTransport
             self._connection_mode = connection_mode
             self.metrics.connection_mode = connection_mode
             # The Python SDK is gateway-mode; connection_mode kept for parity/metrics.
@@ -537,6 +587,9 @@ class SdkBackend(Backend):
             client_kwargs = {}
             if not self.verify_tls:
                 client_kwargs["connection_verify"] = False
+            # Wrap the default transport so injected transport faults / throttles
+            # surface as a real retry count (see _CountingTransport).
+            client_kwargs["transport"] = _CountingTransport(RequestsTransport(), self.metrics)
             self._client = CosmosClient(self.endpoint, credential=self.key, **client_kwargs)
             self.metrics.connections_opened = 1
             self.metrics.metadata_calls["get_database_account"] += 1
