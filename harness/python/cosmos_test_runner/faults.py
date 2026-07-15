@@ -154,13 +154,23 @@ class ProtocolFaultController:
 
     def apply(self, event: str, args: Dict[str, Any]) -> None:
         args = args or {}
-        if event == "net_throttle_window":
-            seconds = args.get("seconds", 120)
-            retry_after_ms = args.get("retry_after_ms", 1000)
-            status = args.get("status", 429)
-            self._post(f"/__fault/throttle?seconds={seconds}"
-                       f"&retry_after_ms={retry_after_ms}&status={status}")
-        elif event == "throttle_window_clear":
+        if event in ("net_throttle_window", "inject_fault"):
+            # net_throttle_window is the original 429-only verb; inject_fault is
+            # the generic form that names any fault in the mitm registry
+            # (throttle_429, gone_410, namecache_410, retrywith_449, ...).
+            fault = args.get("fault", "throttle_429")
+            qs = [f"fault={fault}"]
+            # Scope: time window (seconds) OR first-N requests (count).
+            if args.get("count") is not None:
+                qs.append(f"count={args['count']}")
+            else:
+                qs.append(f"seconds={args.get('seconds', 120)}")
+            # Optional ad-hoc overrides.
+            for k in ("status", "substatus", "retry_after_ms"):
+                if args.get(k) is not None:
+                    qs.append(f"{k}={args[k]}")
+            self._post("/__fault/arm?" + "&".join(qs))
+        elif event in ("throttle_window_clear", "fault_clear"):
             self._post("/__fault/clear")
         else:
             raise ValueError(f"unknown protocol-fault event '{event}'")

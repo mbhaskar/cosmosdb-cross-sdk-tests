@@ -1,35 +1,40 @@
-"""mitmproxy addon: time-windowed HTTP 429 (throttle) injection for Cosmos DB.
+"""mitmproxy addon: pluggable HTTP protocol-fault injection for Cosmos DB.
 
 WHY THIS EXISTS
 ---------------
 Toxiproxy is a Layer-4 (TCP) fault injector: latency, bandwidth, timeouts,
 connection resets. It never parses HTTP, so it *cannot* synthesize an HTTP
-status code. A Cosmos 429 (TooManyRequests) is a Layer-7 protocol fault, so it
-needs a protocol-aware proxy. This addon is that proxy.
+status code. Cosmos protocol faults -- 429 (throttle), 410 (Gone), 449
+(RetryWith), 503 (ServiceUnavailable) -- are Layer-7 responses, so they need a
+protocol-aware proxy. This addon is that proxy.
+
+All fault *shapes* live in ``fault_engine.py`` (a pure, unit-testable registry).
+This file is just the mitmproxy adapter: it maps the control channel to the
+engine and turns engine decisions into ``http.Response`` objects.
 
 TOPOLOGY (local / CI)
 ---------------------
-    SDK runner ->  mitmproxy (this addon, L7 429 window)  ->  Toxiproxy (L4)  ->  Cosmos
-                   :18091 reverse mode                       :18081             emulator/live
+    SDK runner ->  mitmproxy (this addon, L7)  ->  Toxiproxy (L4)  ->  Cosmos
+                   :18091 reverse mode             :18081             emulator/live
 
-The SDK points its endpoint at mitmproxy (:18091). While a throttle window is
-armed, every proxied request gets a synthetic 429 with an `x-ms-retry-after-ms`
-header (the SDK reads this to back off). When the window expires the addon stops
-intercepting and forwards requests to the real backend unchanged, so you observe
-genuine SDK retry/backoff and recovery.
+The SDK points its endpoint at mitmproxy (:18091). While a fault is armed, every
+proxied request gets the synthetic fault response. When the window (time- or
+count-based) expires the addon stops intercepting and forwards requests to the
+real backend unchanged, so you observe genuine SDK retry/backoff and recovery.
 
 CONTROL CHANNEL
 ---------------
-The window is driven over the same proxy port via a magic path prefix the addon
-handles locally and never forwards:
+Driven over the same proxy port via a magic path prefix the addon handles
+locally and never forwards:
 
-    POST https://<proxy>/__fault/throttle?seconds=120&retry_after_ms=1000
-    POST https://<proxy>/__fault/clear
-    GET  https://<proxy>/__fault/status
+    POST /__fault/arm?fault=gone_410&seconds=60         # arm by registry name
+    POST /__fault/arm?fault=throttle_429&count=3        # first-N requests only
+    POST /__fault/throttle?seconds=120&retry_after_ms=1000   # back-compat alias
+    POST /__fault/clear
+    GET  /__fault/status
 
-`harness/.../faults.py:ProtocolFaultController` drives these, mapping the
-`net_throttle_window` / `throttle_window_clear` scenario timeline verbs. You can
-also drive it by hand with curl (see proxy/README.md).
+``harness/.../faults.py:ProtocolFaultController`` drives these; you can also use
+curl (see proxy/README.md). Add a new fault = one entry in fault_engine.FAULTS.
 
 RUN
 ---
@@ -41,77 +46,63 @@ RUN
 
 from __future__ import annotations
 
-import time
+import json
+import os
+import sys
 
-from mitmproxy import ctx, http
+# Ensure the sibling fault_engine module is importable no matter how mitmproxy
+# loads this script (the addons dir is mounted at /addons in the container).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# Shared mutable state for the addon instance.
-_state = {
-    "until": 0.0,          # epoch seconds; throttle active while now < until
-    "retry_after_ms": 1000,
-    "status": 429,
-    "count": 0,            # how many 429s we have injected in the current window
-}
+from fault_engine import FaultEngine
+
+try:  # allow importing this module (and FaultEngine) without mitmproxy installed
+    from mitmproxy import ctx, http
+except ImportError:  # pragma: no cover - only hit in offline unit tests
+    ctx = None
+    http = None
 
 _CONTROL_PREFIX = "/__fault/"
-_THROTTLE_BODY = (
-    b'{"code":"TooManyRequests",'
-    b'"message":"Message: {\\"Errors\\":[\\"Request rate is large. '
-    b'More Request Units may be needed, so no changes were made.\\"]}"}'
-)
+_engine = FaultEngine()
 
 
-def _throttling() -> bool:
-    return time.time() < _state["until"]
+def _reply(flow, code: int, payload: dict) -> None:
+    flow.response = http.Response.make(
+        code, json.dumps(payload).encode(), {"Content-Type": "application/json"})
 
 
-def _remaining() -> float:
-    return max(0.0, _state["until"] - time.time())
-
-
-def request(flow: http.HTTPFlow) -> None:
+def request(flow) -> None:  # mitmproxy hook
     path = flow.request.path
 
     # --- control channel: handle locally, never forward ------------------ #
     if path.startswith(_CONTROL_PREFIX):
         action = path[len(_CONTROL_PREFIX):].split("?", 1)[0].strip("/")
-        q = flow.request.query
-        if action == "throttle":
-            seconds = float(q.get("seconds", "120"))
-            _state["until"] = time.time() + seconds
-            _state["retry_after_ms"] = int(q.get("retry_after_ms", "1000"))
-            _state["status"] = int(q.get("status", "429"))
-            _state["count"] = 0
-            ctx.log.info(f"[throttle_window] armed for {seconds}s "
-                         f"(status={_state['status']}, retry_after_ms={_state['retry_after_ms']})")
-            flow.response = http.Response.make(200, b'{"armed":true}',
-                                               {"Content-Type": "application/json"})
+        q = dict(flow.request.query)
+        if action in ("arm", "throttle"):
+            # "throttle" is the original 429-only verb; treat it as arming the
+            # default throttle fault unless the caller names another one.
+            if action == "throttle":
+                q.setdefault("fault", "throttle_429")
+            state = _engine.arm(q)
+            if ctx:
+                ctx.log.info(f"[fault] armed {state['fault']} "
+                             f"(mode={state['mode']}, status={state['status']}, "
+                             f"substatus={state['substatus']})")
+            _reply(flow, 200, {"armed": True, **state})
         elif action == "clear":
-            _state["until"] = 0.0
-            ctx.log.info("[throttle_window] cleared")
-            flow.response = http.Response.make(200, b'{"armed":false}',
-                                               {"Content-Type": "application/json"})
+            _engine.clear()
+            if ctx:
+                ctx.log.info("[fault] cleared")
+            _reply(flow, 200, {"armed": False})
         elif action == "status":
-            body = (f'{{"armed":{str(_throttling()).lower()},'
-                    f'"remaining_s":{_remaining():.1f},'
-                    f'"injected":{_state["count"]}}}').encode()
-            flow.response = http.Response.make(200, body, {"Content-Type": "application/json"})
+            _reply(flow, 200, _engine.status())
         else:
-            flow.response = http.Response.make(404, b'{"error":"unknown control action"}',
-                                               {"Content-Type": "application/json"})
+            _reply(flow, 404, {"error": f"unknown control action '{action}'"})
         return
 
-    # --- fault injection: synthesize a throttle response ----------------- #
-    if _throttling():
-        _state["count"] += 1
-        flow.response = http.Response.make(
-            _state["status"],
-            _THROTTLE_BODY,
-            {
-                "Content-Type": "application/json",
-                "x-ms-retry-after-ms": str(_state["retry_after_ms"]),
-                "x-ms-substatus": "3200",
-                "x-ms-throttle-injected": "true",
-            },
-        )
+    # --- fault injection: synthesize a fault response -------------------- #
+    decision = _engine.next_response()
+    if decision is not None:
+        status, headers, body = decision
+        flow.response = http.Response.make(status, body, headers)
     # Otherwise: no response set -> mitmproxy forwards upstream normally.

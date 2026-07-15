@@ -110,29 +110,49 @@ python scripts/run-matrix.py --backend emulator \
 
 > The runner wires the scenario's timeline verbs to the right controller
 > automatically: `net_*`/`region_*` → Toxiproxy, `net_throttle_window` /
-> `throttle_window_clear` → mitmproxy. You do not drive the proxies by hand when
-> running scenarios.
+> `throttle_window_clear` and the generic `inject_fault` / `fault_clear` →
+> mitmproxy. You do not drive the proxies by hand when running scenarios.
 
-## Driving the 429 window by hand
+## Driving protocol faults by hand
 
 The mitmproxy addon exposes a control channel on the same port via a magic
-`/__fault/*` path (never forwarded upstream):
+`/__fault/*` path (never forwarded upstream). All fault *shapes* live in the
+pluggable registry `proxy/mitm/fault_engine.py` (`FAULTS`) — adding a new fault
+is one entry there, no addon logic changes.
 
 ```bash
-# throttle everything for 2 minutes with a 1s retry-after hint
+# arm any registered fault by name, scoped by a time window OR a request count:
+curl -k -X POST 'https://localhost:18091/__fault/arm?fault=throttle_429&seconds=120'
+curl -k -X POST 'https://localhost:18091/__fault/arm?fault=gone_410&count=2'
+curl -k -X POST 'https://localhost:18091/__fault/arm?fault=namecache_410&seconds=30'
+
+# back-compat alias: /__fault/throttle == /__fault/arm?fault=throttle_429
 curl -k -X POST 'https://localhost:18091/__fault/throttle?seconds=120&retry_after_ms=1000'
+
+# ad-hoc override without a registry entry:
+curl -k -X POST 'https://localhost:18091/__fault/arm?fault=x&status=408&substatus=9999&count=1'
 
 # check state
 curl -k 'https://localhost:18091/__fault/status'
-#   {"armed":true,"remaining_s":118.4,"injected":37}
+#   {"armed":true,"fault":"gone_410","mode":"count","remaining_count":2,...}
 
-# heal early (otherwise it auto-clears when the window expires)
+# heal early (otherwise it auto-clears when the window/count is exhausted)
 curl -k -X POST 'https://localhost:18091/__fault/clear'
 ```
 
-While armed, every request is answered `429` with `x-ms-retry-after-ms`; once the
-window elapses the addon forwards traffic to Cosmos unchanged, so you observe the
-SDK's real retry/backoff and recovery.
+Registered faults (`fault_engine.FAULTS`):
+
+| name | status | x-ms-substatus | retry-after | SDK reaction |
+| --- | --- | --- | --- | --- |
+| `throttle_429` | 429 | 3200 | yes | back off, retry after delay |
+| `gone_410` | 410 | 1002 (PKRangeGone) | no | refresh routing cache, retry |
+| `namecache_410` | 410 | 1000 (NameCacheStale) | no | refresh collection cache, retry |
+| `retrywith_449` | 449 | 0 | no | immediate retry |
+| `unavailable_503` | 503 | 0 | yes | retry another replica |
+
+While armed, every request is answered with the fault template; once the
+window/count is exhausted the addon forwards traffic to Cosmos unchanged, so you
+observe the SDK's real retry/backoff and recovery.
 
 ## Driving Toxiproxy toxics by hand
 
