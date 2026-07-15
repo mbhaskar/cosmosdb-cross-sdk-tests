@@ -135,7 +135,18 @@ def dispatch(sdk: str, scenario: Dict, config: Dict, sdk_version: str,
                 if source == "local" else "runner not built (no binary/jar found)")
         return _error_result(scenario, sdk, sdk_version, config, f"{sdk} ({source}): {hint}")
 
-    job = {"scenario": scenario, "config": config, "sdk_version": sdk_version, "sdk_source": source}
+    # Inject the SDK identity so each runner namespaces its auto-provisioned
+    # database per SDK (mvp-<scenario>-<sdk>-<run_id>). Without this, Python and
+    # Java share one db per (scenario, run) and collide on the hardcoded item ids
+    # when a mutating scenario (e.g. delete-item) runs on both against a real
+    # backend. Copy config (don't mutate) -- the same dict is shared across the
+    # concurrent dispatch calls for every SDK in the run.
+    job = {
+        "scenario": scenario,
+        "config": {**config, "sdk": sdk},
+        "sdk_version": sdk_version,
+        "sdk_source": source,
+    }
     env = dict(os.environ)
     env.update(run_env)
     try:

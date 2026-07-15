@@ -39,6 +39,7 @@ public class ScenarioExecutor {
         this.backend = makeBackend(config);
         String runId = String.valueOf(config.getOrDefault("run_id", UUID.randomUUID().toString().substring(0, 8)));
         ctx.put("run_id", runId);
+        ctx.put("sdk", String.valueOf(config.getOrDefault("sdk", "java")));
         ctx.put("connection_mode", config.getOrDefault("connection_mode", "gateway"));
         ctx.put("config", config);
         ctx.put("steps", new LinkedHashMap<String, Object>());
@@ -206,7 +207,10 @@ public class ScenarioExecutor {
         if (fixture == null) return;
         String dbId = String.valueOf(fixture.getOrDefault("database", "auto"));
         if ("auto".equals(dbId)) {
-            dbId = "mvp-" + scenario.get("id") + "-" + ctx.get("run_id");
+            // Namespace the auto db per SDK so parallel Python/Java runs of the
+            // same scenario don't share a database (and collide on hardcoded item
+            // ids). Falls back to "java" for standalone CLI use.
+            dbId = "mvp-" + scenario.get("id") + "-" + ctx.get("sdk") + "-" + ctx.get("run_id");
         }
         ctx.put("db", dbId);
         backend.createClient(String.valueOf(ctx.get("connection_mode")));

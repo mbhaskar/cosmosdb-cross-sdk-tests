@@ -366,7 +366,11 @@ class ScenarioRunner:
             return
         db_id = fixture.get("database", "auto")
         if db_id == "auto":
-            db_id = f"mvp-{self.scenario.get('id')}-{self.run_id}"
+            # Namespace the auto db per SDK so parallel Python/Java runs of the
+            # same scenario don't share a database (and collide on hardcoded item
+            # ids). Falls back to "python" for standalone CLI use.
+            sdk = str(self.config.get("sdk", "python"))
+            db_id = f"mvp-{self.scenario.get('id')}-{sdk}-{self.run_id}"
         self.ctx["db"] = db_id
         # An eager client is created so bootstrap metrics are populated.
         self.backend.create_client(connection_mode=self.ctx["connection_mode"])
