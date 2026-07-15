@@ -22,12 +22,32 @@ public class SdkBackend implements Backend {
 
     private final String endpoint;
     private final String key;
+    private final boolean verifyTls;
+    private final Boolean endpointDiscovery;
     private final Metrics metrics = new Metrics();
     private CosmosClient client;
 
     public SdkBackend(String endpoint, String key) {
+        this(endpoint, key, true, null);
+    }
+
+    /**
+     * @param verifyTls          when false the emulator/proxy self-signed cert is
+     *                           tolerated (handled via the JVM trust store; see
+     *                           scripts/build-java-truststore.sh).
+     * @param endpointDiscovery  when non-null, pins {@code endpointDiscoveryEnabled}
+     *                           to this value. Set false for single-region fault
+     *                           runs so the client stays on the configured proxy
+     *                           endpoint instead of adopting the address the
+     *                           emulator self-advertises (which bypasses the
+     *                           Toxiproxy/mitmproxy chain). Left null (SDK default,
+     *                           discovery on) for multi-region/live failover.
+     */
+    public SdkBackend(String endpoint, String key, boolean verifyTls, Boolean endpointDiscovery) {
         this.endpoint = endpoint;
         this.key = key;
+        this.verifyTls = verifyTls;
+        this.endpointDiscovery = endpointDiscovery;
     }
 
     @Override
@@ -46,6 +66,12 @@ public class SdkBackend implements Backend {
                 builder.directMode();
             } else {
                 builder.gatewayMode();
+            }
+            // Pin the client to the configured endpoint when discovery is disabled
+            // (single-region fault runs through the proxy). Left at the SDK default
+            // otherwise so multi-region / live failover still works.
+            if (endpointDiscovery != null) {
+                builder.endpointDiscoveryEnabled(endpointDiscovery);
             }
             client = builder.buildClient();
             metrics.connectionsOpened = 1;

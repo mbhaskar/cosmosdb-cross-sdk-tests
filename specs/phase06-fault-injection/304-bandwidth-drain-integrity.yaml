@@ -12,7 +12,7 @@ description: |
   in the offline mock tier.
 tags: [fault-injection, transport, bandwidth, pagination, query, toxiproxy]
 backends: [emulator, live]
-runners: [python]
+runners: [python, java]
 
 fault_injection:
   proxy: cosmos

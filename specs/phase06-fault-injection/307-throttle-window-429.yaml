@@ -24,7 +24,7 @@ description: |
   offline mock tier.
 tags: [fault-injection, protocol, throttle, 429, retry, mitmproxy]
 backends: [emulator, live]
-runners: [python]
+runners: [python, java]
 
 fault_injection:
   proxy: cosmos

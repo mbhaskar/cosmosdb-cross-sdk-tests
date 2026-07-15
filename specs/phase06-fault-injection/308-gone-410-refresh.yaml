@@ -25,7 +25,7 @@ description: |
   offline mock tier.
 tags: [fault-injection, protocol, gone, "410", retry, cache-refresh, mitmproxy]
 backends: [emulator, live]
-runners: [python]
+runners: [python, java]
 
 fault_injection:
   proxy: cosmos

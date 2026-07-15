@@ -29,22 +29,71 @@ public class ScenarioExecutor {
     private final List<String> logs = new ArrayList<>();
     private final Consumer<String> logSink;
 
+    // Fault-injection plumbing (mirrors the Python ScenarioRunner).
+    private final Map<String, Object> faultInjection;
+    private final ProxyFaultController faultController;      // L4 transport (Toxiproxy)
+    private final ProtocolFaultController protocolController; // L7 protocol (mitmproxy)
+    // timeline events grouped by "<when>\u0000<stepId>".
+    private final Map<String, List<Map<String, Object>>> timeline;
+    // latency(ms) + resource samples keyed by scope (loop id).
+    private final Map<String, List<Double>> latencySamples = new LinkedHashMap<>();
+    private final Map<String, List<Double>> resourceSamples = new LinkedHashMap<>();
+
+    private static final java.util.Set<String> TRANSPORT_EVENTS = new java.util.HashSet<>(java.util.Arrays.asList(
+            "net_latency", "net_timeout", "net_reset", "net_bandwidth",
+            "net_slow_close", "region_down", "region_up", "reset_faults"));
+    private static final java.util.Set<String> PROTOCOL_EVENTS = new java.util.HashSet<>(java.util.Arrays.asList(
+            "net_throttle_window", "throttle_window_clear", "inject_fault", "fault_clear"));
+
     @SuppressWarnings("unchecked")
     public ScenarioExecutor(Map<String, Object> scenario, Map<String, Object> config,
                             String sdkVersion, Consumer<String> logSink) {
         this.scenario = scenario;
-        this.config = config;
         this.sdkVersion = sdkVersion;
         this.logSink = logSink;
-        this.backend = makeBackend(config);
-        String runId = String.valueOf(config.getOrDefault("run_id", UUID.randomUUID().toString().substring(0, 8)));
+
+        Object fi = scenario.get("fault_injection");
+        this.faultInjection = fi instanceof Map ? (Map<String, Object>) fi : null;
+
+        // When a scenario opts into transport/protocol fault injection and a proxy
+        // endpoint is configured, point the SDK client at the proxy chain instead
+        // of the backend directly, so injected toxics/faults are on the wire.
+        // Mirrors Python executor.py:104-119.
+        Map<String, Object> routed = config;
+        boolean isMock = "mock".equals(String.valueOf(config.getOrDefault("backend", "mock")));
+        if (this.faultInjection != null && !isMock) {
+            boolean protocol = truthy(this.faultInjection.get("protocol"));
+            Object proxyEp = protocol
+                    ? firstNonNull(config.get("mitm_endpoint"), config.get("proxy_endpoint"))
+                    : config.get("proxy_endpoint");
+            if (proxyEp != null) {
+                routed = new LinkedHashMap<>(config);
+                routed.put("endpoint", proxyEp);
+                // Pin the client to the proxy endpoint: without this, gateway
+                // endpoint discovery adopts the emulator's self-advertised address
+                // (localhost:8081) and bypasses the proxy. Multi-region failover
+                // needs discovery ON (and a real multi-region account).
+                if (!truthy(this.faultInjection.get("multi_region"))) {
+                    routed.put("enable_endpoint_discovery", Boolean.FALSE);
+                }
+            }
+        }
+        this.config = routed;
+        this.backend = makeBackend(routed);
+
+        String runId = String.valueOf(routed.getOrDefault("run_id", UUID.randomUUID().toString().substring(0, 8)));
         ctx.put("run_id", runId);
-        ctx.put("sdk", String.valueOf(config.getOrDefault("sdk", "java")));
-        ctx.put("connection_mode", config.getOrDefault("connection_mode", "gateway"));
-        ctx.put("config", config);
+        ctx.put("sdk", String.valueOf(routed.getOrDefault("sdk", "java")));
+        ctx.put("connection_mode", routed.getOrDefault("connection_mode", "gateway"));
+        ctx.put("config", routed);
         ctx.put("steps", new LinkedHashMap<String, Object>());
+
+        this.timeline = indexTimeline((List<Map<String, Object>>) scenario.get("timeline"));
+        this.faultController = makeFaultController();
+        this.protocolController = makeProtocolController();
     }
 
+    @SuppressWarnings("unchecked")
     private static Backend makeBackend(Map<String, Object> config) {
         String backend = String.valueOf(config.getOrDefault("backend", "mock"));
         if ("mock".equals(backend)) {
@@ -55,7 +104,57 @@ public class ScenarioExecutor {
         if (endpoint == null || key == null) {
             throw new IllegalArgumentException("backend '" + backend + "' requires endpoint and key");
         }
-        return new SdkBackend(String.valueOf(endpoint), String.valueOf(key));
+        // Emulator / proxied endpoints present self-signed certs; trust is handled
+        // via the JVM trust store (see scripts/build-java-truststore.sh), so we
+        // only record intent here. Explicit tls_verify overrides.
+        boolean verifyTls = config.containsKey("tls_verify")
+                ? truthy(config.get("tls_verify"))
+                : false;
+        // enable_endpoint_discovery is injected above for single-region fault runs.
+        Boolean discovery = config.containsKey("enable_endpoint_discovery")
+                ? Boolean.valueOf(truthy(config.get("enable_endpoint_discovery")))
+                : null;
+        return new SdkBackend(String.valueOf(endpoint), String.valueOf(key), verifyTls, discovery);
+    }
+
+    private ProxyFaultController makeFaultController() {
+        if (faultInjection == null || "mock".equals(String.valueOf(config.getOrDefault("backend", "mock")))) {
+            return null;
+        }
+        return new ProxyFaultController(
+                str(config.get("toxiproxy_url")),
+                strOr(faultInjection.get("proxy"), "cosmos"),
+                strOr(faultInjection.get("secondary_proxy"), "cosmos-secondary"));
+    }
+
+    private ProtocolFaultController makeProtocolController() {
+        if (faultInjection == null || "mock".equals(String.valueOf(config.getOrDefault("backend", "mock")))) {
+            return null;
+        }
+        Object ep = firstNonNull(config.get("mitm_endpoint"), config.get("proxy_endpoint"), config.get("endpoint"));
+        return new ProtocolFaultController(ep == null ? null : String.valueOf(ep));
+    }
+
+    private static Object firstNonNull(Object... vals) {
+        for (Object v : vals) {
+            if (v != null && !String.valueOf(v).isEmpty()) return v;
+        }
+        return null;
+    }
+
+    private static boolean truthy(Object o) {
+        if (o == null) return false;
+        if (o instanceof Boolean) return (Boolean) o;
+        String s = String.valueOf(o).trim().toLowerCase();
+        return s.equals("true") || s.equals("1") || s.equals("yes");
+    }
+
+    private static String str(Object o) {
+        return o == null ? null : String.valueOf(o);
+    }
+
+    private static String strOr(Object o, String dflt) {
+        return o == null ? dflt : String.valueOf(o);
     }
 
     /**
@@ -134,7 +233,14 @@ public class ScenarioExecutor {
             setupFixture(fixture);
             List<Map<String, Object>> steps = (List<Map<String, Object>>) scenario.getOrDefault("steps", new ArrayList<>());
             for (Map<String, Object> step : steps) {
-                runStep(step);
+                Object sid = step.get("id");
+                fireEvents("before", sid);
+                if ("loop".equals(String.valueOf(step.get("action")))) {
+                    runLoop(step);
+                } else {
+                    runStep(step, null, true);
+                }
+                fireEvents("after", sid);
             }
             for (Map<String, Object> a : assertionResults) {
                 if (!(Boolean) a.get("passed")) {
@@ -147,6 +253,20 @@ public class ScenarioExecutor {
             error = e.getClass().getSimpleName() + ": " + e.getMessage();
             log("ERROR " + error);
         } finally {
+            if (faultController != null) {
+                try {
+                    faultController.reset();
+                } catch (Exception e) {
+                    log("fault reset warning: " + e.getMessage());
+                }
+            }
+            if (protocolController != null) {
+                try {
+                    protocolController.reset();
+                } catch (Exception e) {
+                    log("protocol reset warning: " + e.getMessage());
+                }
+            }
             teardownFixture(fixture);
         }
 
@@ -172,10 +292,15 @@ public class ScenarioExecutor {
     }
 
     @SuppressWarnings("unchecked")
-    private void runStep(Map<String, Object> step) {
+    private OpResult runStep(Map<String, Object> step, String scope, boolean evaluate) {
         String action = String.valueOf(step.get("action"));
         Map<String, Object> params = (Map<String, Object>) resolve(step.getOrDefault("params", new LinkedHashMap<>()));
+        long tStep = System.currentTimeMillis();
         OpResult result = StepHandlers.execute(backend, action, params, ctx);
+        double elapsedMs = System.currentTimeMillis() - tStep;
+        if (scope != null) {
+            latencySamples.computeIfAbsent(scope, k -> new ArrayList<>()).add(elapsedMs);
+        }
 
         Object id = step.get("id");
         if (id != null) {
@@ -193,13 +318,124 @@ public class ScenarioExecutor {
             diagnostics.add(d);
         }
 
+        if (evaluate) {
+            evaluate(step, result, scope);
+        }
+        return result;
+    }
+
+    @SuppressWarnings("unchecked")
+    private void evaluate(Map<String, Object> step, OpResult result, String scope) {
+        Map<String, Object> context = new LinkedHashMap<>();
+        context.put("latency", latencySamples);
+        context.put("resource", resourceSamples);
+        context.put("scope", scope);
+        Object id = step.get("id");
         List<Map<String, Object>> expect = (List<Map<String, Object>>) step.get("expect");
-        for (Map<String, Object> outc : Assertions.evaluate(expect, result, backend)) {
-            outc.put("step", id != null ? id : action);
+        for (Map<String, Object> outc : Assertions.evaluate(expect, result, backend, context)) {
+            outc.put("step", id != null ? id : step.get("action"));
             assertionResults.add(outc);
             log("  assert " + outc.get("name") + ": " + ((Boolean) outc.get("passed") ? "PASS" : "FAIL")
                     + " " + outc.get("detail"));
         }
+    }
+
+    /**
+     * Repeat nested steps {@code count} times or for a {@code duration}. Records
+     * per-iteration latency + resource samples under the loop's scope, then
+     * evaluates the loop's own expect (e.g. latency_percentile / resource_stable).
+     * Mirrors Python executor._run_loop.
+     */
+    @SuppressWarnings("unchecked")
+    private void runLoop(Map<String, Object> step) {
+        String scope = step.get("id") != null ? String.valueOf(step.get("id")) : "loop";
+        List<Map<String, Object>> inner = (List<Map<String, Object>>) step.getOrDefault("steps", new ArrayList<>());
+        Integer count = step.get("count") != null ? asInt(step.get("count")) : null;
+        Double duration = parseDuration(step.get("duration"));
+        OpResult last = OpResult.ok(200);
+        long started = System.currentTimeMillis();
+        int i = 0;
+        while (true) {
+            if (count != null && i >= count) break;
+            if (duration != null && (System.currentTimeMillis() - started) / 1000.0 >= duration) break;
+            if (count == null && duration == null) break;
+            for (Map<String, Object> sub : inner) {
+                last = runStep(sub, scope, true);
+            }
+            resourceSamples.computeIfAbsent(scope, k -> new ArrayList<>())
+                    .add((double) asInt(backend.metrics().asMap().getOrDefault("connections_opened", 0)));
+            i++;
+        }
+        log("loop '" + scope + "' ran " + i + " iteration(s)");
+        evaluate(step, last, scope);
+    }
+
+    // -- timeline / fault events ------------------------------------------- //
+
+    private static Map<String, List<Map<String, Object>>> indexTimeline(List<Map<String, Object>> timeline) {
+        Map<String, List<Map<String, Object>>> idx = new LinkedHashMap<>();
+        if (timeline == null) return idx;
+        for (Map<String, Object> ev : timeline) {
+            String when = ev.containsKey("before") ? "before" : "after";
+            Object anchor = ev.get(when);
+            idx.computeIfAbsent(when + "\u0000" + anchor, k -> new ArrayList<>()).add(ev);
+        }
+        return idx;
+    }
+
+    @SuppressWarnings("unchecked")
+    private void fireEvents(String when, Object stepId) {
+        if (stepId == null) return;
+        List<Map<String, Object>> events = timeline.get(when + "\u0000" + stepId);
+        if (events == null) return;
+        for (Map<String, Object> ev : events) {
+            String event = String.valueOf(ev.get("event"));
+            Map<String, Object> args = ev.get("args") instanceof Map
+                    ? (Map<String, Object>) ev.get("args") : new LinkedHashMap<>();
+            if (PROTOCOL_EVENTS.contains(event)) {
+                if (protocolController == null) {
+                    log("  timeline[" + when + " " + stepId + "]: '" + event
+                            + "' skipped (no protocol controller; needs emulator/live + mitmproxy)");
+                    continue;
+                }
+                protocolController.apply(event, args);
+                log("  timeline[" + when + " " + stepId + "]: " + event + " " + args);
+                continue;
+            }
+            if (TRANSPORT_EVENTS.contains(event)) {
+                if (faultController == null) {
+                    log("  timeline[" + when + " " + stepId + "]: '" + event
+                            + "' skipped (no fault controller; needs emulator/live + Toxiproxy)");
+                    continue;
+                }
+                faultController.apply(event, args);
+                log("  timeline[" + when + " " + stepId + "]: " + event + " " + args);
+                continue;
+            }
+            // Mock control-plane events are handled by the Python harness only;
+            // Java's MockBackend has no control_event, and fault scenarios never
+            // run on mock, so just note it.
+            log("  timeline: backend ignores control event '" + event + "'");
+        }
+    }
+
+    private static Double parseDuration(Object spec) {
+        if (spec == null) return null;
+        if (spec instanceof Number) return ((Number) spec).doubleValue();
+        String s = String.valueOf(spec).trim().toLowerCase();
+        try {
+            if (s.endsWith("ms")) return Double.parseDouble(s.substring(0, s.length() - 2)) / 1000.0;
+            if (s.endsWith("s")) return Double.parseDouble(s.substring(0, s.length() - 1));
+            if (s.endsWith("m")) return Double.parseDouble(s.substring(0, s.length() - 1)) * 60.0;
+            return Double.parseDouble(s);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private static int asInt(Object o) {
+        if (o instanceof Number) return ((Number) o).intValue();
+        return Integer.parseInt(String.valueOf(o));
     }
 
     @SuppressWarnings("unchecked")

@@ -177,6 +177,29 @@ client must trust (or be told to skip) the proxy cert — for the emulator use i
 well-known cert, and for mitmproxy install its CA (`~/.mitmproxy/mitmproxy-ca-cert.pem`)
 or run the SDK with cert verification disabled in the test config.
 
+### Java data-plane trust (fault runs)
+
+The Python SDK can simply set `verify=False`, but `azure-cosmos` 4.63.0's
+`CosmosClientBuilder` exposes no custom HttpClient or insecure-TLS switch. In
+gateway mode it uses reactor-netty, which defaults to the **JVM trust store**, so
+the Java runner trusts the emulator + mitmproxy certs via a trust store rather
+than a code change. Build one and point the JVM at it:
+
+```bash
+# assembles build/java-cosmos-truststore.jks from the emulator gateway cert
+# and ~/.mitmproxy/mitmproxy-ca-cert.pem (start the stack first)
+./scripts/build-java-truststore.sh
+
+export JAVA_TOOL_OPTIONS="-Djavax.net.ssl.trustStore=$PWD/build/java-cosmos-truststore.jks \
+                          -Djavax.net.ssl.trustStorePassword=changeit"
+```
+
+`JAVA_TOOL_OPTIONS` is inherited by the orchestrator's Java subprocess, so every
+`[python, java]` fault scenario (T-30x) then runs the Java SDK through the same
+proxy chain. The mitmproxy control channel (`ProtocolFaultController`) and the
+Toxiproxy admin API (`ProxyFaultController`) do **not** need this — they use their
+own trust-all / plain-HTTP clients.
+
 ## Tear down
 
 ```bash

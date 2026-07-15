@@ -12,7 +12,7 @@ description: |
   (proxy/docker-compose.proxy.yaml). Not runnable in the offline mock tier.
 tags: [fault-injection, transport, timeout, retry, toxiproxy]
 backends: [emulator, live]
-runners: [python]
+runners: [python, java]
 
 fault_injection:
   proxy: cosmos

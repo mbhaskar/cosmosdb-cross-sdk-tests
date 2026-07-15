@@ -25,6 +25,9 @@ public final class StepHandlers {
                         bool(params.get("create_if_not_exists")));
             case "create_item":
                 return backend.createItem(db, container, (Map<String, Object>) params.get("item"));
+            case "seed_items":
+                return backend.seedItems(db, container, asInt(params.get("count")),
+                        (Map<String, Object>) params.get("template"));
             case "read_item":
                 return backend.readItem(db, container, str(params.get("id")), params.get("partition_key"));
             case "replace_item":
@@ -38,6 +41,14 @@ public final class StepHandlers {
                 return backend.queryItems(db, container, str(params.get("query")),
                         (List<Map<String, Object>>) params.get("parameters"),
                         params.get("partition_key"), bool(params.get("cross_partition")));
+            case "query_drain":
+                // Drain a (paginated) query to exhaustion. Defaults to cross-partition
+                // so the SDK streams every page under whatever transport conditions
+                // are active (mirrors the Python query_drain).
+                return backend.queryItems(db, container, str(params.get("query")),
+                        (List<Map<String, Object>>) params.get("parameters"),
+                        params.get("partition_key"),
+                        params.containsKey("cross_partition") ? bool(params.get("cross_partition")) : true);
             case "delete_database":
                 return backend.deleteDatabase(str(params.get("id")));
             default:
@@ -51,5 +62,10 @@ public final class StepHandlers {
 
     private static boolean bool(Object o) {
         return Boolean.TRUE.equals(o) || "true".equals(String.valueOf(o));
+    }
+
+    private static int asInt(Object o) {
+        if (o instanceof Number) return ((Number) o).intValue();
+        return Integer.parseInt(String.valueOf(o));
     }
 }

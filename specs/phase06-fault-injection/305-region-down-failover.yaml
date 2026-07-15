@@ -13,6 +13,11 @@ description: |
   mock tier, and requires an SDK client configured with preferred regions.
 tags: [fault-injection, transport, region-down, failover, multi-region, toxiproxy]
 backends: [emulator, live]
+# python-only: the local Toxiproxy stack points both region routes at ONE
+# single-region emulator, so the SDK never actually observes a distinct
+# secondary region and failover_region can't be validated. Un-gate java once a
+# real multi-region live account is wired in (the Java executor already supports
+# the fault plumbing; only this scenario's environment is the blocker).
 runners: [python]
 
 fault_injection:
