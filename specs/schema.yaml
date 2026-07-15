@@ -1,5 +1,7 @@
 # Scenario spec format (MVP subset)
 #
+# For a full, formatted keyword reference see specs/SPEC_REFERENCE.md.
+#
 # A scenario is a YAML document with the following shape. Only the fields used
 # by the MVP runner are documented here; the format is intentionally a strict
 # subset of the full design in ARCHITECTURE.md so it can grow later.
@@ -30,8 +32,9 @@
 #                          net_latency | net_timeout | net_reset |
 #                          net_bandwidth | net_slow_close |
 #                          region_down | region_up | reset_faults (proxy tier, L4)
+#                          inject_fault | fault_clear             (proxy tier, L7)
 #                          net_throttle_window | throttle_window_clear
-#                                                                 (proxy tier, L7)
+#                                             (proxy tier, L7; 429 back-compat alias)
 #     args: {...}        - event args, e.g.
 #                          split_partition: { range: "1", into: ["1-a","1-b"] }
 #                          throttle: { op: create_item, count: 2,
@@ -41,14 +44,28 @@
 #                          net_bandwidth: { rate_kbps: 8 }
 #                          net_slow_close: { delay_ms: 500 }
 #                          region_down/region_up: { region: primary }
+#                          inject_fault: { fault: gone_410, count: 2 } OR
+#                                        { fault: throttle_429, seconds: 120 }
+#                                        (optional overrides: status, substatus,
+#                                         retry_after_ms)
 #                          net_throttle_window: { seconds: 120,
 #                                      retry_after_ms: 1000, status: 429 }
 #   Routing: mock verbs (split/throttle/...) -> stateful mock backend;
-#   net_*/region_*/reset_faults (L4 TCP) -> Toxiproxy; net_throttle_window /
-#   throttle_window_clear (L7 HTTP status) -> mitmproxy addon
-#   (proxy/mitm/fault_addon.py). Toxiproxy is TCP-only and CANNOT emit a
-#   429 -- that is why the throttle window is a separate mitmproxy verb. On the
-#   mock tier the transport/protocol verbs log-and-skip (no controller).
+#   net_*/region_*/reset_faults (L4 TCP) -> Toxiproxy; inject_fault / fault_clear
+#   and the net_throttle_window / throttle_window_clear aliases (L7 HTTP status) ->
+#   mitmproxy addon (proxy/mitm/fault_addon.py). Toxiproxy is TCP-only and CANNOT
+#   emit a 429/410 -- that is why L7 protocol faults are separate mitmproxy verbs.
+#   On the mock tier the transport/protocol verbs log-and-skip (no controller).
+#
+#   Registered L7 faults (proxy/mitm/fault_engine.py FAULTS) for inject_fault:
+#     throttle_429    (429, substatus 3200, x-ms-retry-after-ms) - back off, retry
+#     gone_410        (410, substatus 1002 PKRangeGone, no retry-after) - refresh
+#                                                            routing cache, retry
+#     namecache_410   (410, substatus 1000 NameCacheStale, no retry-after) -
+#                                                    refresh collection cache, retry
+#     retrywith_449   (449) - immediate retry
+#     unavailable_503 (503, x-ms-retry-after-ms) - retry another replica
+#   Scope a fault with EITHER seconds=N (time window) OR count=N (first N requests).
 #
 # fault_injection:       - optional. Opts the scenario into the fault-injection
 #                          proxy stack (proxy/docker-compose.proxy.yaml). Only
@@ -57,8 +74,9 @@
 #   proxy: cosmos        - Toxiproxy proxy name the timeline net_* verbs target
 #   multi_region: bool   - when true the scenario expects a secondary proxy route
 #                          (cosmos-secondary) for failover (T-305)
-#   protocol: mitmproxy  - when set the scenario uses L7 verbs (net_throttle_window)
-#                          served by the mitmproxy addon (T-307)
+#   protocol: mitmproxy  - when set the scenario uses L7 verbs (inject_fault /
+#                          fault_clear, or the net_throttle_window alias) served
+#                          by the mitmproxy addon (T-307, T-308)
 #
 # fixture:               - optional. When present the runner provisions an
 #                          isolated database (and container) before the steps
