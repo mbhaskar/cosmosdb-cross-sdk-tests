@@ -46,7 +46,7 @@
 #   Routing: mock verbs (split/throttle/...) -> stateful mock backend;
 #   net_*/region_*/reset_faults (L4 TCP) -> Toxiproxy; net_throttle_window /
 #   throttle_window_clear (L7 HTTP status) -> mitmproxy addon
-#   (proxy/mitm/throttle_window.py). Toxiproxy is TCP-only and CANNOT emit a
+#   (proxy/mitm/fault_addon.py). Toxiproxy is TCP-only and CANNOT emit a
 #   429 -- that is why the throttle window is a separate mitmproxy verb. On the
 #   mock tier the transport/protocol verbs log-and-skip (no controller).
 #

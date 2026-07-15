@@ -41,7 +41,7 @@ RUN
     mitmdump --listen-port 18091 \
              --mode reverse:https://localhost:18081 \
              --set ssl_insecure=true \
-             -s proxy/mitm/throttle_window.py
+             -s proxy/mitm/fault_addon.py
 """
 
 from __future__ import annotations

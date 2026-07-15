@@ -77,6 +77,6 @@ services:
       - --set
       - ssl_insecure=true
       - -s
-      - /addons/throttle_window.py
+      - /addons/fault_addon.py
     volumes:
       - ./mitm:/addons:ro

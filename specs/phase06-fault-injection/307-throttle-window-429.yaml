@@ -4,7 +4,7 @@ section: "6.7"
 title: "Sustained 429 window: SDK backs off honoring retry-after, then recovers"
 description: |
   A time-windowed 429 (TooManyRequests) storm is injected at the HTTP layer by
-  the mitmproxy addon (proxy/mitm/throttle_window.py) -- Toxiproxy is TCP-only
+  the mitmproxy addon (proxy/mitm/fault_addon.py) -- Toxiproxy is TCP-only
   and cannot synthesize a status code, so this is the Layer-7 counterpart to the
   transport-fault scenarios (T-301..T-306).
 

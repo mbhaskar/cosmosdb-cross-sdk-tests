@@ -18,8 +18,8 @@ both**:
 > **Common misconception:** "configure Toxiproxy to return 429s." Toxiproxy
 > operates purely at TCP and never parses HTTP, so it *cannot* produce a status
 > code. Anything that is fundamentally an HTTP response (like a `429
-> TooManyRequests`) is injected by the mitmproxy addon instead. See
-> `mitm/throttle_window.py`.
+> TooManyRequests` or a `410 Gone`) is injected by the mitmproxy addon instead.
+> See `mitm/fault_addon.py`.
 
 The two compose into a chain, so a scenario can be *throttled **and** on a bad
 network* at once:
@@ -39,7 +39,8 @@ SDK runner ─▶ mitmproxy (:18091, L7 429 window) ─▶ Toxiproxy (:18081, L4
 | `docker-compose.proxy.yaml` | Brings up emulator + Toxiproxy + mitmproxy |
 | `toxiproxy.json` | Pre-registers the `cosmos` / `cosmos-secondary` proxy routes |
 | `profiles/*.yaml` | Declarative **Toxiproxy** toxic profiles (L4 only) |
-| `mitm/throttle_window.py` | **mitmproxy** addon: time-windowed 429 injection (L7) |
+| `mitm/fault_addon.py` | **mitmproxy** addon: L7 protocol-fault injection (429/410/449/503) |
+| `mitm/fault_engine.py` | Pure, unit-testable fault registry/state machine behind the addon |
 
 ## Bring the stack up
 

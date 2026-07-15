@@ -120,7 +120,7 @@ class ProxyFaultController:
 
 class ProtocolFaultController:
     """Drives Layer-7 protocol faults (e.g. a time-windowed 429 storm) via the
-    mitmproxy addon in ``proxy/mitm/throttle_window.py``.
+    mitmproxy addon in ``proxy/mitm/fault_addon.py``.
 
     Toxiproxy (see :class:`ProxyFaultController`) is TCP-only and cannot emit an
     HTTP status code, so the ``net_throttle_window`` / ``throttle_window_clear``

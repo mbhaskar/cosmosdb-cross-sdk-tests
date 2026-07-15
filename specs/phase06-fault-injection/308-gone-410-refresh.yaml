@@ -5,7 +5,7 @@ title: "PartitionKeyRangeGone (410/1002): SDK refreshes routing cache and recove
 description: |
   A count-scoped 410 Gone storm (substatus 1002 = PartitionKeyRangeGone) is
   injected at the HTTP layer by the mitmproxy addon
-  (proxy/mitm/throttle_window.py, via the pluggable fault_engine registry).
+  (proxy/mitm/fault_addon.py, via the pluggable fault_engine registry).
 
   410 is *not* a parameterized 429: it carries a different substatus, no
   x-ms-retry-after-ms hint, and a different body. On PartitionKeyRangeGone the

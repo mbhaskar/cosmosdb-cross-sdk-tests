@@ -1,7 +1,7 @@
 """Protocol-fault engine for the mitmproxy addon (pure, no mitmproxy import).
 
 This module holds ALL the fault-selection logic so it can be unit-tested without
-a running mitmproxy. The addon (``throttle_window.py``) is a thin adapter that
+a running mitmproxy. The addon (``fault_addon.py``) is a thin adapter that
 turns :class:`FaultEngine` decisions into ``mitmproxy.http.Response`` objects.
 
 WHY A REGISTRY
