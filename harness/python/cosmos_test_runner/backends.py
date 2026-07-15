@@ -535,10 +535,18 @@ class _CountingTransport:
 class SdkBackend(Backend):
     """Drives the real azure-cosmos SDK (emulator or live account)."""
 
-    def __init__(self, endpoint: str, key: str, verify_tls: bool = True) -> None:
+    def __init__(self, endpoint: str, key: str, verify_tls: bool = True,
+                 endpoint_discovery: Optional[bool] = None) -> None:
         self.endpoint = endpoint
         self.key = key
         self.verify_tls = verify_tls
+        # When None, the SDK default (True) is used. Set False to keep the client
+        # pinned to the configured endpoint (e.g. the proxy) instead of adopting
+        # the address the account self-advertises during endpoint discovery --
+        # otherwise gateway discovery routes data-plane requests straight to the
+        # emulator (localhost:8081), bypassing the Toxiproxy/mitmproxy chain and
+        # defeating transport-fault injection.
+        self.endpoint_discovery = endpoint_discovery
         self.metrics = Metrics()
         self._client = None
         self._connection_mode = "gateway"
@@ -590,6 +598,11 @@ class SdkBackend(Backend):
             # Wrap the default transport so injected transport faults / throttles
             # surface as a real retry count (see _CountingTransport).
             client_kwargs["transport"] = _CountingTransport(RequestsTransport(), self.metrics)
+            # Pin the client to the configured endpoint when discovery is disabled
+            # (single-region fault runs through the proxy). Left at the SDK default
+            # otherwise so multi-region / live failover still works.
+            if self.endpoint_discovery is not None:
+                client_kwargs["enable_endpoint_discovery"] = self.endpoint_discovery
             self._client = CosmosClient(self.endpoint, credential=self.key, **client_kwargs)
             self.metrics.connections_opened = 1
             self.metrics.metadata_calls["get_database_account"] += 1
@@ -750,4 +763,9 @@ def make_backend(config: Dict[str, Any]) -> Backend:
     tls_verify = config.get("tls_verify")
     if tls_verify is None:
         tls_verify = not (backend == "emulator" or config.get("proxy_endpoint"))
-    return SdkBackend(endpoint, key, verify_tls=bool(tls_verify))
+    # None -> SDK default (discovery on). The executor sets this False for
+    # single-region transport-fault runs so the client stays on the proxy
+    # endpoint instead of the emulator's self-advertised address.
+    endpoint_discovery = config.get("enable_endpoint_discovery")
+    return SdkBackend(endpoint, key, verify_tls=bool(tls_verify),
+                      endpoint_discovery=endpoint_discovery)

@@ -108,6 +108,14 @@ class ScenarioRunner:
                 proxy_ep = config.get("proxy_endpoint")
             if proxy_ep:
                 config = {**config, "endpoint": proxy_ep}
+                # Keep the client pinned to the proxy endpoint. Without this, the
+                # SDK's gateway endpoint discovery adopts the address the emulator
+                # self-advertises (localhost:8081) for data-plane requests and
+                # bypasses the proxy, so injected toxics never hit the wire.
+                # Multi-region failover scenarios need discovery ON (and a real
+                # multi-region account), so leave it alone there.
+                if not fi.get("multi_region"):
+                    config["enable_endpoint_discovery"] = False
                 self.config = config
         self.backend = make_backend(config)
         self.run_id = config.get("run_id", uuid.uuid4().hex[:8])
