@@ -58,6 +58,20 @@ import_cert() {
 }
 
 # 1) mitmproxy CA (covers every host mitm intercepts, incl. the 18091 chain).
+# In the Dockerized stack the CA lives inside the mitmproxy container rather than
+# ~/.mitmproxy, so fall back to copying it out when it's not on the host.
+if [[ ! -f "$MITM_CA" ]]; then
+  MITM_CONTAINER="${MITM_CONTAINER:-mitmproxy}"
+  if command -v docker >/dev/null 2>&1 \
+     && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$MITM_CONTAINER"; then
+    FETCHED="$(dirname "$OUT_JKS")/mitmproxy-ca-cert.pem"
+    if docker cp "$MITM_CONTAINER:/home/mitmproxy/.mitmproxy/mitmproxy-ca-cert.pem" \
+          "$FETCHED" >/dev/null 2>&1; then
+      echo ">> pulled mitmproxy CA from container '$MITM_CONTAINER'"
+      MITM_CA="$FETCHED"
+    fi
+  fi
+fi
 if [[ -f "$MITM_CA" ]]; then
   import_cert "mitmproxy-ca" "$MITM_CA"
 else

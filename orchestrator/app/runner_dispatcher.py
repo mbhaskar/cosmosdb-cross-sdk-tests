@@ -22,8 +22,34 @@ DEFAULT_LOCAL_JAR = os.path.join(HARNESS, "java", "variants", "local", "cosmos-t
 DEFAULT_PUBLISHED_JAR = os.path.join(HARNESS, "java", "target", "cosmos-test-runner.jar")
 DEFAULT_LOCAL_VENV = os.path.join(HARNESS, "python", ".venv-local")
 
+# JVM trust store that trusts the emulator + mitmproxy self-signed certs. The
+# Java azure-cosmos client (reactor-netty) validates TLS against the JVM trust
+# store, so L7/proxy fault scenarios (endpoint -> mitmproxy :18091) fail the
+# initial databaseAccount handshake without it. Built by
+# scripts/build-java-truststore.sh. Auto-wired below so Java proxy runs work
+# out of the box once the store exists (mirrors Python's verify=False).
+DEFAULT_JAVA_TRUSTSTORE = os.path.join(REPO_ROOT, "build", "java-cosmos-truststore.jks")
+DEFAULT_JAVA_TRUSTSTORE_PASS = "changeit"
+
 # Languages this orchestrator knows how to drive.
 SDK_NAMES = ["python", "java"]
+
+
+def _java_truststore_env() -> dict:
+    """Return JAVA_TOOL_OPTIONS pointing at the local trust store when it exists.
+
+    No-op when the caller already set JAVA_TOOL_OPTIONS (respect explicit config)
+    or the store hasn't been built. Without this, Java scenarios routed through
+    mitmproxy/Toxiproxy fail TLS at client init with an opaque NullPointerException
+    (client never constructed)."""
+    if os.environ.get("JAVA_TOOL_OPTIONS"):
+        return {}
+    store = os.environ.get("JAVA_COSMOS_TRUSTSTORE", DEFAULT_JAVA_TRUSTSTORE)
+    if not os.path.exists(store):
+        return {}
+    pw = os.environ.get("JAVA_COSMOS_TRUSTSTORE_PASS", DEFAULT_JAVA_TRUSTSTORE_PASS)
+    return {"JAVA_TOOL_OPTIONS":
+            f"-Djavax.net.ssl.trustStore={store} -Djavax.net.ssl.trustStorePassword={pw}"}
 
 
 def _venv_python(venv_dir: str) -> str:
@@ -57,7 +83,7 @@ def resolve_runner(sdk: str, source: str, entry: Optional[Dict[str, Any]] = None
         jar = entry.get("jar", DEFAULT_LOCAL_JAR if source == "local" else DEFAULT_PUBLISHED_JAR)
         if not os.path.isabs(jar):
             jar = os.path.join(REPO_ROOT, jar)
-        return ((["java", "-jar", jar] if os.path.exists(jar) else None), cwd, {})
+        return ((["java", "-jar", jar] if os.path.exists(jar) else None), cwd, _java_truststore_env())
 
     return (None, REPO_ROOT, {})
 

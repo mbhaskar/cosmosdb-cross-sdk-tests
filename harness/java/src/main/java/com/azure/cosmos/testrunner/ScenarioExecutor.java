@@ -63,7 +63,14 @@ public class ScenarioExecutor {
         Map<String, Object> routed = config;
         boolean isMock = "mock".equals(String.valueOf(config.getOrDefault("backend", "mock")));
         if (this.faultInjection != null && !isMock) {
-            boolean protocol = truthy(this.faultInjection.get("protocol"));
+            // A protocol (L7) fault opts into the mitmproxy front of the chain.
+            // NOTE: `protocol` is a NAME string (e.g. "mitmproxy"), not a boolean,
+            // so mirror Python's truthiness (any non-empty value => present) rather
+            // than truthy() which only accepts true/1/yes. Without this the client
+            // is routed to the bare Toxiproxy endpoint (:18081) and bypasses mitm.
+            Object protocolVal = this.faultInjection.get("protocol");
+            boolean protocol = protocolVal != null
+                    && !String.valueOf(protocolVal).trim().isEmpty();
             Object proxyEp = protocol
                     ? firstNonNull(config.get("mitm_endpoint"), config.get("proxy_endpoint"))
                     : config.get("proxy_endpoint");

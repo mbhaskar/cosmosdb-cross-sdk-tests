@@ -24,10 +24,13 @@ description: |
 
   Gateway-mode only (mitmproxy is HTTP; direct/rntbd is opaque TCP). Requires the
   emulator + mitmproxy stack (proxy/docker-compose.proxy.yaml, SDK endpoint ->
-  :18091). Not runnable on the offline mock tier.
+  :18091). Not runnable on the offline mock tier. The Java runner additionally
+  needs a JVM trust store for mitmproxy's CA (reactor-netty validates TLS against
+  the JVM store, unlike Python's verify=False); build it once with
+  scripts/build-java-truststore.sh and the dispatcher auto-wires it.
 tags: [control-plane, feedrange, pkranges, cache, pagination, mitmproxy]
 backends: [emulator]
-runners: [python]
+runners: [python, java]
 
 fault_injection:
   proxy: cosmos
