@@ -172,11 +172,25 @@ class ProtocolFaultController:
             self._post("/__fault/arm?" + "&".join(qs))
         elif event in ("throttle_window_clear", "fault_clear"):
             self._post("/__fault/clear")
+        elif event == "advertise_pkranges":
+            # Fabricate a paged multi-range pkranges topology over a single
+            # emulator so the SDK's feed-range / routing-map cache assembles M
+            # ranges. Served by the addon's /__topology/* control channel.
+            qs = [f"ranges={args.get('ranges', 4)}"]
+            if args.get("page_size") is not None:
+                qs.append(f"page_size={args['page_size']}")
+            self._post("/__topology/arm?" + "&".join(qs))
+        elif event == "pkranges_clear":
+            self._post("/__topology/clear")
         else:
             raise ValueError(f"unknown protocol-fault event '{event}'")
 
     def reset(self) -> None:
         try:
             self._post("/__fault/clear")
+        except ProxyError:
+            pass
+        try:
+            self._post("/__topology/clear")
         except ProxyError:
             pass

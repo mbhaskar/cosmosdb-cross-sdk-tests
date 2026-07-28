@@ -55,6 +55,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from fault_engine import FaultEngine
+from topology_engine import TopologyEngine
 
 try:  # allow importing this module (and FaultEngine) without mitmproxy installed
     from mitmproxy import ctx, http
@@ -63,7 +64,9 @@ except ImportError:  # pragma: no cover - only hit in offline unit tests
     http = None
 
 _CONTROL_PREFIX = "/__fault/"
+_TOPOLOGY_PREFIX = "/__topology/"
 _engine = FaultEngine()
+_topology = TopologyEngine()
 
 
 def _reply(flow, code: int, payload: dict) -> None:
@@ -98,6 +101,63 @@ def request(flow) -> None:  # mitmproxy hook
             _reply(flow, 200, _engine.status())
         else:
             _reply(flow, 404, {"error": f"unknown control action '{action}'"})
+        return
+
+    # --- topology channel: arm/clear the synthetic pkranges responder ---- #
+    if path.startswith(_TOPOLOGY_PREFIX):
+        action = path[len(_TOPOLOGY_PREFIX):].split("?", 1)[0].strip("/")
+        q = dict(flow.request.query)
+        if action == "arm":
+            state = _topology.arm(q)
+            if ctx:
+                ctx.log.info(f"[topology] armed ranges={state['ranges']} "
+                             f"page_size={state['page_size']}")
+            _reply(flow, 200, {"armed": True, **state})
+        elif action == "clear":
+            _topology.clear()
+            if ctx:
+                ctx.log.info("[topology] cleared")
+            _reply(flow, 200, {"armed": False})
+        elif action == "status":
+            _reply(flow, 200, _topology.status())
+        else:
+            _reply(flow, 404, {"error": f"unknown topology action '{action}'"})
+        return
+
+    # --- topology synthesis: fabricate a paged multi-range pkranges body -- #
+    # Fully synthesized (no upstream call): the collection rid comes from the
+    # request path and the ETag is stable across pages, so the SDK keys and
+    # assembles its routing-map / feed-range cache exactly as with a real
+    # multi-partition account.
+    if _topology.armed and TopologyEngine.is_pkranges(path):
+        coll_rid = TopologyEngine.collection_rid(path)
+        etag = _topology.etag()
+        # Change-feed drain semantics: once the SDK already holds this topology it
+        # re-reads with If-None-Match: <etag> and expects a 304 to stop draining.
+        # Without this, every drain returns the full range set again and the SDK
+        # accumulates duplicate ranges -> overlap -> infinite full-refresh retry.
+        inm = flow.request.headers.get("If-None-Match")
+        if TopologyEngine.etag_matches(inm, etag):
+            if ctx:
+                ctx.log.info("[topology] pkranges 304 (client already current)")
+            flow.response = http.Response.make(
+                304, b"", {"etag": etag, "x-ms-topology-injected": "true"})
+            return
+        offset = TopologyEngine.parse_offset(
+            flow.request.headers.get("x-ms-continuation"))
+        body, next_cont, count = _topology.page(offset, coll_rid, etag)
+        headers = {
+            "Content-Type": "application/json",
+            "etag": etag,
+            "x-ms-item-count": str(count),
+            "x-ms-topology-injected": "true",
+        }
+        if next_cont is not None:
+            headers["x-ms-continuation"] = next_cont
+        if ctx:
+            ctx.log.info(f"[topology] pkranges page offset={offset} "
+                         f"count={count} next={next_cont}")
+        flow.response = http.Response.make(200, body, headers)
         return
 
     # --- fault injection: synthesize a fault response -------------------- #

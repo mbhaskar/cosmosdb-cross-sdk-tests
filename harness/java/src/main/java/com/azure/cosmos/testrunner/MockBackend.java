@@ -160,6 +160,21 @@ public class MockBackend implements Backend {
         return run("delete_database", ctx);
     }
 
+    @Override
+    public OpResult readFeedRanges(String dbId, String containerId) {
+        // The offline mock models a single logical partition space; the paged
+        // multi-range feed-range scenario (C-220) is emulator-only. Return one
+        // full range so mock runs stay well-defined.
+        OpResult r = OpResult.ok(200);
+        java.util.List<Object> items = new java.util.ArrayList<>();
+        Map<String, Object> m = new java.util.LinkedHashMap<>();
+        m.put("id", "0");
+        m.put("feed_range", "FULL");
+        items.add(m);
+        r.items = items;
+        return r;
+    }
+
     // -- interpreter ------------------------------------------------------ //
 
     @SuppressWarnings("unchecked")

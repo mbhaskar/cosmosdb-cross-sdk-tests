@@ -29,6 +29,15 @@ public interface Backend {
     OpResult deleteDatabase(String dbId);
 
     /**
+     * Read the container's feed ranges (one per physical partition key range).
+     * Drives the SDK's routing-map / feed-range cache: it fetches and assembles
+     * every pkranges page. Against a mitmproxy-synthesized topology this yields M
+     * ranges over a single-partition emulator (mirrors Python read_feed_ranges).
+     * {@code items} carries one entry per returned range.
+     */
+    OpResult readFeedRanges(String dbId, String containerId);
+
+    /**
      * Bulk-seed {@code count} items by expanding {@code {n}} in string template
      * values (n = 1..count). Implemented once here over {@link #createItem} so it
      * behaves identically on every backend (mirrors the Python Backend.seed_items).

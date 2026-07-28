@@ -54,5 +54,7 @@ def execute_action(backend: Backend, action: str, params: Dict[str, Any], ctx: D
         )
     if action == "delete_database":
         return backend.delete_database(params["id"])
+    if action == "read_feed_ranges":
+        return backend.read_feed_ranges(db, container)
 
     return OpResult(ok=False, error=f"unknown action '{action}'")

@@ -43,7 +43,8 @@ public class ScenarioExecutor {
             "net_latency", "net_timeout", "net_reset", "net_bandwidth",
             "net_slow_close", "region_down", "region_up", "reset_faults"));
     private static final java.util.Set<String> PROTOCOL_EVENTS = new java.util.HashSet<>(java.util.Arrays.asList(
-            "net_throttle_window", "throttle_window_clear", "inject_fault", "fault_clear"));
+            "net_throttle_window", "throttle_window_clear", "inject_fault", "fault_clear",
+            "advertise_pkranges", "pkranges_clear"));
 
     @SuppressWarnings("unchecked")
     public ScenarioExecutor(Map<String, Object> scenario, Map<String, Object> config,

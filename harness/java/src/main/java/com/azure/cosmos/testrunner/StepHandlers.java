@@ -51,6 +51,8 @@ public final class StepHandlers {
                         params.containsKey("cross_partition") ? bool(params.get("cross_partition")) : true);
             case "delete_database":
                 return backend.deleteDatabase(str(params.get("id")));
+            case "read_feed_ranges":
+                return backend.readFeedRanges(db, container);
             default:
                 return OpResult.fail(0, "UnknownAction", "unknown action '" + action + "'");
         }

@@ -1,0 +1,56 @@
+id: "C-220"
+phase: 8
+section: "8.20"
+title: "FeedRange cache: SDK assembles a paged multi-range topology (mitmproxy)"
+description: |
+  Proves the real SDK's routing-map / feed-range cache correctly fetches and
+  assembles a MULTI-RANGE, MULTI-PAGE PartitionKeyRanges topology -- without a
+  real multi-partition account.
+
+  A single-partition emulator only ever reports one physical range. To exercise
+  the SDK's paging + assembly logic cheaply, the mitmproxy addon
+  (proxy/mitm/topology_engine.py + fault_addon.py) intercepts the
+  ``GET .../pkranges`` read and fabricates M contiguous ranges served over
+  several pages via ``x-ms-continuation``. The SDK must:
+    * fetch page 0, follow the continuation token to fetch the rest,
+    * stitch the pages into a single routing map keyed by the real collection rid,
+    * return one FeedRange per synthesized range.
+
+  ``read_feed_ranges`` is the first data-plane op so the routing cache is cold
+  when the topology is armed (a prior point-write would warm it with the real
+  single range). This is the L7 analogue of the offline mock cache scenarios
+  (C-201 / C-210): the mock proves the contract deterministically; C-220 proves
+  the real SDK assembles a paged topology on the wire.
+
+  Gateway-mode only (mitmproxy is HTTP; direct/rntbd is opaque TCP). Requires the
+  emulator + mitmproxy stack (proxy/docker-compose.proxy.yaml, SDK endpoint ->
+  :18091). Not runnable on the offline mock tier.
+tags: [control-plane, feedrange, pkranges, cache, pagination, mitmproxy]
+backends: [emulator]
+runners: [python]
+
+fault_injection:
+  proxy: cosmos
+  protocol: mitmproxy
+
+fixture:
+  database: "auto"
+  container:
+    id: "orders"
+    partition_key: "/customerId"
+
+timeline:
+  - before: list_ranges
+    event: advertise_pkranges
+    args: { ranges: 4, page_size: 2 }
+  - after: list_ranges
+    event: pkranges_clear
+
+steps:
+  - id: list_ranges
+    action: read_feed_ranges
+    expect:
+      - { type: ok, name: pkranges_read_ok }
+      # 4 synthesized ranges assembled across 2 pages of 2 => proves paging +
+      # multi-range assembly on a single-partition emulator.
+      - { type: item_count, name: four_ranges_assembled, value: 4 }

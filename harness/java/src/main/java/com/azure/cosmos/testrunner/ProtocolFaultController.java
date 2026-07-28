@@ -111,6 +111,18 @@ public class ProtocolFaultController {
             post("/__fault/arm?" + String.join("&", qs));
         } else if ("throttle_window_clear".equals(event) || "fault_clear".equals(event)) {
             post("/__fault/clear");
+        } else if ("advertise_pkranges".equals(event)) {
+            // Fabricate a paged multi-range pkranges topology over a single
+            // emulator so the SDK's feed-range / routing-map cache assembles M
+            // ranges. Served by the addon's /__topology/* control channel.
+            List<String> qs = new ArrayList<>();
+            qs.add("ranges=" + a.getOrDefault("ranges", 4));
+            if (a.get("page_size") != null) {
+                qs.add("page_size=" + a.get("page_size"));
+            }
+            post("/__topology/arm?" + String.join("&", qs));
+        } else if ("pkranges_clear".equals(event)) {
+            post("/__topology/clear");
         } else {
             throw new IllegalArgumentException("unknown protocol-fault event '" + event + "'");
         }
@@ -119,6 +131,11 @@ public class ProtocolFaultController {
     public void reset() {
         try {
             post("/__fault/clear");
+        } catch (RuntimeException ignored) {
+            // best effort
+        }
+        try {
+            post("/__topology/clear");
         } catch (RuntimeException ignored) {
             // best effort
         }

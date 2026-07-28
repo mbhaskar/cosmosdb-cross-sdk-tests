@@ -100,6 +100,12 @@ class Backend:
     def query_items(self, db_id: str, container_id: str, query: str, parameters=None, partition_key=None, cross_partition=False, **kwargs) -> OpResult:
         raise NotImplementedError
 
+    def read_feed_ranges(self, db_id: str, container_id: str, **kwargs) -> OpResult:
+        """Read the container's feed ranges (one per physical partition key range).
+        Drives the SDK's routing-map/feed-range cache: it fetches and assembles
+        all pkrange pages. ``items`` carries one entry per returned range."""
+        raise NotImplementedError
+
     def seed_items(self, db_id: str, container_id: str, count: int, template: Dict[str, Any], **kwargs) -> OpResult:
         """Bulk-seed ``count`` items by expanding ``{n}`` in string template
         values (n = 1..count). Implemented once here over ``create_item`` so it
@@ -168,6 +174,8 @@ class MockBackend(Backend):
         self._throttle: Dict[str, Dict[str, Any]] = {}
         # Event recorder for the op currently executing (reset per public op).
         self._events: Dict[str, List] = {"status": [], "metadata": []}
+        # Synthetic physical-partition count advertised by read_feed_ranges.
+        self._cp_partitions: int = 1
 
     # Data-plane ops routed to a partition: eligible for split (410) faults and
     # PKRange-cache accounting.
@@ -215,8 +223,20 @@ class MockBackend(Backend):
     def delete_database(self, db_id, **kwargs) -> OpResult:
         return self._run("delete_database", {"db_id": db_id})
 
-    # -- interpreter ------------------------------------------------------- #
+    def read_feed_ranges(self, db_id, container_id, **kwargs) -> OpResult:
+        """Model ReadPartitionKeyRanges: one metadata fetch, one feed range per
+        configured physical partition (see ``configure_control_plane``)."""
+        ckey = f"{db_id}/{container_id}"
+        self._events = {"status": [], "metadata": []}
+        self._refresh_pkranges(ckey)
+        n = max(1, int(self._cp_partitions))
+        items = [{"id": str(i), "feed_range": f"range-{i}"} for i in range(n)]
+        result = OpResult(ok=True, status_code=200, items=items)
+        result.metadata_events = list(self._events["metadata"])
+        result.status_sequence = [200]
+        return result
 
+    # -- interpreter ------------------------------------------------------- #
     def _run(self, op: str, ctx: Dict[str, Any]) -> OpResult:
         """Public entry: apply any scheduled control-plane faults, run the profile
         step machine, and attach the observed event streams to the result."""
@@ -294,9 +314,14 @@ class MockBackend(Backend):
         else:
             raise ValueError(f"unknown control-plane event '{event}'")
 
-    def configure_control_plane(self, cp: Dict[str, Any]) -> None:  # noqa: ARG002
-        """Reserved for future use (initial partition count, consistency). The
-        current model derives topology lazily, so this is a no-op today."""
+    def configure_control_plane(self, cp: Dict[str, Any]) -> None:
+        """Record the initial physical-partition count so ``read_feed_ranges``
+        can advertise the matching number of feed ranges. Topology is otherwise
+        derived lazily, so the rest is a no-op today."""
+        try:
+            self._cp_partitions = max(1, int(cp.get("partitions", 1)))
+        except (TypeError, ValueError):
+            self._cp_partitions = 1
         return None
 
     def _container(self, db_id, container_id) -> Optional[Dict[str, Any]]:
@@ -705,6 +730,19 @@ class SdkBackend(Backend):
             self._last_diag = None
             self._client.delete_database(db_id, response_hook=self._capture)
             return OpResult(ok=True, status_code=204, diagnostics=self._last_diag)
+        except Exception as exc:  # noqa: BLE001
+            return _sdk_error(exc, self.metrics)
+
+    def read_feed_ranges(self, db_id, container_id, **kwargs) -> OpResult:
+        # Drives the real routing-map/feed-range cache: the SDK fetches every
+        # pkranges page (following x-ms-continuation) and returns one FeedRange
+        # per partition key range. Against a mitmproxy-synthesized topology this
+        # yields M ranges over a single-partition emulator.
+        try:
+            self._last_diag = None
+            ranges = list(self._container(db_id, container_id).read_feed_ranges())
+            items = [{"id": str(i), "feed_range": str(r)} for i, r in enumerate(ranges)]
+            return OpResult(ok=True, status_code=200, items=items, diagnostics=self._last_diag)
         except Exception as exc:  # noqa: BLE001
             return _sdk_error(exc, self.metrics)
 

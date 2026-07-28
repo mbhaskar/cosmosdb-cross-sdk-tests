@@ -325,7 +325,8 @@ class ScenarioRunner:
     _TRANSPORT_EVENTS = {"net_latency", "net_timeout", "net_reset", "net_bandwidth",
                          "net_slow_close", "region_down", "region_up", "reset_faults"}
     _PROTOCOL_EVENTS = {"net_throttle_window", "throttle_window_clear",
-                        "inject_fault", "fault_clear"}
+                        "inject_fault", "fault_clear",
+                        "advertise_pkranges", "pkranges_clear"}
 
     def _fire_events(self, when: str, step_id) -> None:
         if not step_id:

@@ -218,6 +218,31 @@ public class SdkBackend implements Backend {
         }
     }
 
+    @Override
+    public OpResult readFeedRanges(String dbId, String containerId) {
+        // Drives the real routing-map / feed-range cache: the SDK fetches every
+        // pkranges page and returns one FeedRange per partition key range. Against
+        // a mitmproxy-synthesized topology this yields M ranges over a single
+        // emulator partition.
+        try {
+            List<com.azure.cosmos.models.FeedRange> ranges =
+                    client.getDatabase(dbId).getContainer(containerId).getFeedRanges();
+            List<Object> items = new ArrayList<>();
+            int i = 0;
+            for (com.azure.cosmos.models.FeedRange fr : ranges) {
+                Map<String, Object> m = new java.util.LinkedHashMap<>();
+                m.put("id", String.valueOf(i++));
+                m.put("feed_range", String.valueOf(fr));
+                items.add(m);
+            }
+            OpResult r = OpResult.ok(200);
+            r.items = items;
+            return r;
+        } catch (Exception e) {
+            return sdkError(e);
+        }
+    }
+
     private OpResult sdkError(Exception e) {
         int status = 0;
         String code = e.getClass().getSimpleName();
