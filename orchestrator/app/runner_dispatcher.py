@@ -151,8 +151,13 @@ def _entry_for_source(name: str, source: str) -> Dict[str, Any]:
 
 
 def dispatch(sdk: str, scenario: Dict, config: Dict, sdk_version: str,
-             source: str = "published", timeout: int = 120) -> Dict[str, Any]:
-    """Run one (scenario, sdk) job and return its result dict."""
+             source: str = "published", timeout: int = 120, control: Any = None) -> Dict[str, Any]:
+    """Run one (scenario, sdk) job and return its result dict.
+
+    ``control`` (optional) is a per-run handle with ``register(proc)`` /
+    ``unregister(proc)`` so the orchestrator can track and kill the live runner
+    subprocess when a run is cancelled. Duck-typed to keep this module free of a
+    dependency on the orchestrator's control type."""
     if sdk not in SDK_NAMES:
         return _error_result(scenario, sdk, sdk_version, config, f"unknown sdk '{sdk}'")
     cmd, cwd, run_env = resolve_runner(sdk, source, _entry_for_source(sdk, source))
@@ -175,22 +180,54 @@ def dispatch(sdk: str, scenario: Dict, config: Dict, sdk_version: str,
     }
     env = dict(os.environ)
     env.update(run_env)
+    proc = None
     try:
-        proc = subprocess.run(
-            cmd, input=json.dumps(job), capture_output=True, text=True,
-            cwd=cwd, env=env, timeout=timeout,
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, cwd=cwd, env=env,
         )
-    except subprocess.TimeoutExpired:
-        return _error_result(scenario, sdk, sdk_version, config, f"runner timed out after {timeout}s")
+        if control is not None:
+            control.register(proc)
+        try:
+            stdout, stderr = proc.communicate(input=json.dumps(job), timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            if control is not None and getattr(control, "cancelled", None) and control.cancelled.is_set():
+                return _cancelled_result(scenario, sdk, sdk_version, config)
+            return _error_result(scenario, sdk, sdk_version, config, f"runner timed out after {timeout}s")
+    finally:
+        if control is not None and proc is not None:
+            control.unregister(proc)
 
-    if proc.returncode != 0 or not proc.stdout.strip():
-        detail = (proc.stderr or proc.stdout or "no output").strip()[-800:]
+    # A cancel kills the subprocess; surface that as 'cancelled', not a spurious error.
+    if control is not None and getattr(control, "cancelled", None) and control.cancelled.is_set():
+        return _cancelled_result(scenario, sdk, sdk_version, config)
+
+    if proc.returncode != 0 or not stdout.strip():
+        detail = (stderr or stdout or "no output").strip()[-800:]
         return _error_result(scenario, sdk, sdk_version, config, f"runner exited {proc.returncode}: {detail}")
 
     try:
-        return json.loads(proc.stdout)
+        return json.loads(stdout)
     except json.JSONDecodeError as exc:
         return _error_result(scenario, sdk, sdk_version, config, f"invalid result JSON: {exc}")
+
+
+def _cancelled_result(scenario: Dict, sdk: str, sdk_version: str, config: Dict) -> Dict[str, Any]:
+    return {
+        "scenario_id": str(scenario.get("id")),
+        "title": scenario.get("title"),
+        "sdk": sdk,
+        "sdk_version": sdk_version,
+        "backend": config.get("backend", "mock"),
+        "status": "cancelled",
+        "duration_ms": 0,
+        "metrics": {},
+        "assertions": [],
+        "error": "run cancelled",
+        "logs": ["run cancelled by user"],
+    }
 
 
 def _error_result(scenario: Dict, sdk: str, sdk_version: str, config: Dict, msg: str) -> Dict[str, Any]:

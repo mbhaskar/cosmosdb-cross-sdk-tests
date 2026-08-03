@@ -40,6 +40,8 @@
   .badge.error { background: rgba(210,153,34,.18); color: var(--error); }
   .badge.skip { background: rgba(110,118,129,.18); color: var(--skip); }
   .badge.running { background: rgba(76,141,255,.18); color: var(--run); }
+  .badge.queued { background: #1c2536; color: var(--muted); }
+  .badge.cancelled { background: rgba(210,153,34,.12); color: var(--error); }
   .badge.none { background: #1c2536; color: var(--muted); }
   .cell button { padding: 3px 8px; font-size: 12px; }
   .summary { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 12px; }
@@ -81,6 +83,8 @@
   <h1>🌌 CosmosDB Cross-SDK Test Matrix</h1>
   <span class="spacer"></span>
   <span id="runinfo" style="color:var(--muted);font-size:12px"></span>
+  <button id="refreshBtn" onclick="refreshState()" title="Re-fetch the latest run state without reloading">⟳ Refresh</button>
+  <button id="stopRun" onclick="stopRun()" style="display:none">■ Stop</button>
   <button class="primary" id="runAll">▶ Run All</button>
 </header>
 
@@ -159,8 +163,9 @@
 <div class="toast" id="toast"></div>
 
 <script>
-const STATUS_ICON = { pass: '✅', fail: '❌', error: '⚠️', skip: '—', running: '⏳' };
-let scenarios = [], sdks = [], results = {}, pollTimer = null;
+const STATUS_ICON = { pass: '✅', fail: '❌', error: '⚠️', skip: '—', running: '⏳', queued: '•', cancelled: '🚫' };
+const LASTRUN_LS = 'cosmosMatrixLastRun';
+let scenarios = [], sdks = [], results = {}, pollTimer = null, currentRunId = null;
 
 function toast(msg) {
   const t = document.getElementById('toast');
@@ -173,6 +178,18 @@ async function init() {
   sdks = (await (await fetch('/api/sdks')).json());
   renderSdkPicker();
   renderHead(); renderRows();
+  // Restore the last run's context so a page reload doesn't lose it — re-fetch
+  // its state and resume polling if it's still in flight.
+  const rid = localStorage.getItem(LASTRUN_LS);
+  if (rid) {
+    try {
+      const run = await (await fetch('/api/runs/' + rid)).json();
+      if (run && !run.detail) {
+        currentRunId = rid;
+        if (applyRun(run)) pollRun(rid);
+      }
+    } catch (e) { /* ignore — run may have been pruned */ }
+  }
 }
 
 const SRC_BADGE = { published: 'Registry', local: 'Local build' };
@@ -282,18 +299,89 @@ async function startRun(scenarioIds, sdkNames) {
   pollRun(res.run_id);
 }
 
+// Merge a run payload (saved results + live queued/running states) into the grid
+// and update summary + run controls. Returns true if the run is still in flight.
+function applyRun(run) {
+  if (!run) return false;
+  if (run.id) currentRunId = run.id;
+  for (const r of (run.results || [])) results[`${r.scenario_id}|${r.sdk}`] = r;
+  // Overlay live states for jobs that don't yet have a saved terminal result.
+  if (run.job_states) {
+    for (const [k, stt] of Object.entries(run.job_states)) {
+      const cur = results[k];
+      const terminal = cur && !['running', 'queued'].includes(cur.status);
+      if (terminal) continue;                 // saved result wins
+      if (stt === 'done') continue;           // finished but result not saved yet — keep showing running
+      results[k] = { status: stt };           // 'queued' or 'running'
+    }
+  }
+  renderRows(); renderSummary(run);
+  const running = run.status !== 'completed' && run.status !== 'cancelled';
+  updateRunControls(run, running);
+  return running;
+}
+
+function updateRunControls(run, running) {
+  const info = document.getElementById('runinfo');
+  const stopBtn = document.getElementById('stopRun');
+  const total = run.total_jobs || Object.keys(run.job_states || {}).length || 0;
+  const done = run.done_jobs != null ? run.done_jobs : (run.results || []).length;
+  let txt = 'Run ' + (currentRunId || '');
+  if (running) {
+    txt += run.cancelling ? ' — cancelling…' : ' — running';
+    if (total) txt += ` ${done}/${total}`;
+    stopBtn.style.display = '';
+  } else {
+    txt += run.status === 'cancelled' ? ' 🚫 cancelled' : ' ✓';
+    stopBtn.style.display = 'none';
+  }
+  info.textContent = txt;
+}
+
 function pollRun(runId) {
+  currentRunId = runId;
+  localStorage.setItem(LASTRUN_LS, runId);
   if (pollTimer) clearInterval(pollTimer);
   document.getElementById('runinfo').textContent = 'Run ' + runId + ' …';
   pollTimer = setInterval(async () => {
-    const run = await (await fetch('/api/runs/' + runId)).json();
-    for (const r of run.results) results[`${r.scenario_id}|${r.sdk}`] = r;
-    renderRows(); renderSummary(run);
-    if (run.status === 'completed') {
-      clearInterval(pollTimer); pollTimer = null;
-      document.getElementById('runinfo').textContent = 'Run ' + runId + ' ✓';
+    try {
+      const resp = await fetch('/api/runs/' + runId);
+      if (!resp.ok) return;                   // transient — keep polling
+      const run = await resp.json();
+      if (!applyRun(run)) { clearInterval(pollTimer); pollTimer = null; }
+    } catch (e) { /* transient network error — keep the timer alive */ }
+  }, 800);
+}
+
+// Manual refresh: re-fetch the current/last run and re-render without a full
+// page reload (which would drop the grid + run context). Resumes polling if the
+// run turns out to still be in flight.
+async function refreshState() {
+  let rid = currentRunId || localStorage.getItem(LASTRUN_LS);
+  try {
+    if (!rid) {
+      const runs = await (await fetch('/api/runs')).json();
+      if (Array.isArray(runs) && runs.length) rid = runs[0].id;
     }
-  }, 700);
+    if (!rid) { toast('No runs yet'); return; }
+    const run = await (await fetch('/api/runs/' + rid)).json();
+    if (run.detail) { toast('⚠ ' + run.detail); return; }
+    currentRunId = rid;
+    localStorage.setItem(LASTRUN_LS, rid);
+    const running = applyRun(run);
+    if (running) pollRun(rid);
+    else if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    toast('Refreshed');
+  } catch (e) { toast('⚠ refresh failed'); }
+}
+
+async function stopRun() {
+  if (!currentRunId) { toast('No active run'); return; }
+  try {
+    const resp = await fetch('/api/runs/' + currentRunId + '/cancel', { method: 'POST' });
+    const res = await resp.json();
+    toast(res.detail || ('Cancelling — killed ' + (res.killed || 0) + ' runner(s)'));
+  } catch (e) { toast('⚠ cancel failed'); }
 }
 
 function renderSummary(run) {

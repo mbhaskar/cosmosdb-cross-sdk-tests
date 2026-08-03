@@ -50,6 +50,55 @@ _executor = ThreadPoolExecutor(max_workers=4)
 _fault_lock = threading.Lock()
 
 
+class RunControl:
+    """Per-run coordination handle: cancellation flag, live runner-process
+    registry (so a cancel can kill hung subprocesses), and per-job state
+    (queued/running) so the UI can show what's actually happening in flight."""
+
+    def __init__(self, jobs: List[tuple]):
+        self.cancelled = threading.Event()
+        self._procs: set = set()
+        self._lock = threading.Lock()
+        # (scenario_id, sdk_name) -> "queued" | "running"
+        self.states: Dict[str, str] = {f"{sid}|{sdk}": "queued" for sid, sdk in jobs}
+
+    def register(self, proc) -> None:
+        with self._lock:
+            self._procs.add(proc)
+
+    def unregister(self, proc) -> None:
+        with self._lock:
+            self._procs.discard(proc)
+
+    def set_state(self, scenario_id: str, sdk: str, state: str) -> None:
+        with self._lock:
+            self.states[f"{scenario_id}|{sdk}"] = state
+
+    def cancel(self) -> int:
+        """Flag cancellation and kill every live runner subprocess. Returns the
+        number of processes signalled."""
+        self.cancelled.set()
+        with self._lock:
+            procs = list(self._procs)
+        killed = 0
+        for p in procs:
+            try:
+                p.kill()
+                killed += 1
+            except Exception:  # noqa: BLE001 - process may have already exited
+                pass
+        return killed
+
+    def snapshot(self) -> Dict[str, str]:
+        with self._lock:
+            return dict(self.states)
+
+
+# run_id -> RunControl for in-flight runs (removed when the run finishes).
+_RUN_CONTROL: Dict[str, RunControl] = {}
+_RUN_CONTROL_LOCK = threading.Lock()
+
+
 def _is_fault_scenario(scenario: Dict[str, Any]) -> bool:
     """A scenario drives the shared fault proxies if it declares a
     ``fault_injection`` block or is tagged ``fault-injection``."""
@@ -186,7 +235,33 @@ def get_run(run_id: str):
     run = store.get_run(run_id)
     if not run:
         raise HTTPException(404, f"run {run_id} not found")
+    # Attach live per-job state (queued/running) + progress for in-flight runs so
+    # the UI can distinguish "actively running" from "queued behind the fault
+    # lock" and render an accurate progress/heartbeat without a full reload.
+    with _RUN_CONTROL_LOCK:
+        control = _RUN_CONTROL.get(run_id)
+    if control is not None:
+        states = control.snapshot()
+        run["job_states"] = states
+        run["cancelling"] = control.cancelled.is_set()
+        run["total_jobs"] = len(states)
+        run["done_jobs"] = len(run.get("results", []))
     return run
+
+
+@app.post("/api/runs/{run_id}/cancel")
+def cancel_run(run_id: str):
+    run = store.get_run(run_id)
+    if not run:
+        raise HTTPException(404, f"run {run_id} not found")
+    with _RUN_CONTROL_LOCK:
+        control = _RUN_CONTROL.get(run_id)
+    if control is None:
+        # Already finished (or never started) — nothing live to stop.
+        return {"run_id": run_id, "status": run.get("status"), "killed": 0,
+                "detail": "run is not active"}
+    killed = control.cancel()
+    return {"run_id": run_id, "status": "cancelling", "killed": killed}
 
 
 @app.post("/api/runs")
@@ -251,35 +326,77 @@ def _execute_run(run_id: str, scenario_ids: List[str], sdks: List[Dict], config:
     if config.get("backend", "mock") == "mock":
         job_config["mock_profile"] = MOCK_PROFILE
 
-    futures = {
-        _executor.submit(_run_job, scenario, sdk, job_config): (scenario, sdk)
-        for scenario, sdk in jobs
-    }
-    for fut in as_completed(futures):
-        result = fut.result()
-        store.save_result(run_id, result)
+    control = RunControl([(str(sc["id"]), sdk["name"]) for sc, sdk in jobs])
+    with _RUN_CONTROL_LOCK:
+        _RUN_CONTROL[run_id] = control
 
-    summary = _summarize(run_id)
-    overall = "completed"
-    store.finish_run(run_id, overall, summary)
+    try:
+        futures = {
+            _executor.submit(_run_job, scenario, sdk, job_config, control): (scenario, sdk)
+            for scenario, sdk in jobs
+        }
+        for fut in as_completed(futures):
+            result = fut.result()
+            store.save_result(run_id, result)
+
+        summary = _summarize(run_id)
+        overall = "cancelled" if control.cancelled.is_set() else "completed"
+        store.finish_run(run_id, overall, summary)
+    finally:
+        with _RUN_CONTROL_LOCK:
+            _RUN_CONTROL.pop(run_id, None)
 
 
-def _run_job(scenario: Dict, sdk: Dict, job_config: Dict) -> Dict[str, Any]:
+def _run_job(scenario: Dict, sdk: Dict, job_config: Dict, control: "RunControl") -> Dict[str, Any]:
     """Dispatch one (scenario, sdk) job.
 
     Fault-injection scenarios acquire ``_fault_lock`` and reset the shared proxies
     first, so they run strictly one-at-a-time against a clean proxy state and can't
     bleed armed faults onto each other. Non-fault scenarios dispatch directly and
-    keep running concurrently on the pool."""
+    keep running concurrently on the pool.
+
+    Honors cancellation: a job that hasn't started when the run is cancelled is
+    short-circuited to a 'cancelled' result instead of dispatching a subprocess."""
+    sid = str(scenario["id"])
     version = sdk.get("version", "latest")
     source = sdk.get("source", "published")
-    if _is_fault_scenario(scenario):
-        with _fault_lock:
-            _reset_shared_proxies(job_config)
-            return runner_dispatcher.dispatch(
-                sdk["name"], scenario, job_config, version, source)
-    return runner_dispatcher.dispatch(
-        sdk["name"], scenario, job_config, version, source)
+    if control.cancelled.is_set():
+        return _cancelled(scenario, sdk, job_config.get("backend", "mock"))
+    try:
+        if _is_fault_scenario(scenario):
+            # Stay "queued" while blocked on the fault lock so the live view shows
+            # only the one fault job that actually holds the shared proxies as
+            # "running"; the rest remain queued until their turn.
+            with _fault_lock:
+                # Re-check after acquiring the lock — the run may have been
+                # cancelled while this job was queued behind a slow sibling.
+                if control.cancelled.is_set():
+                    return _cancelled(scenario, sdk, job_config.get("backend", "mock"))
+                control.set_state(sid, sdk["name"], "running")
+                _reset_shared_proxies(job_config)
+                return runner_dispatcher.dispatch(
+                    sdk["name"], scenario, job_config, version, source, control=control)
+        control.set_state(sid, sdk["name"], "running")
+        return runner_dispatcher.dispatch(
+            sdk["name"], scenario, job_config, version, source, control=control)
+    finally:
+        control.set_state(sid, sdk["name"], "done")
+
+
+def _cancelled(scenario: Dict, sdk: Dict, backend: str) -> Dict[str, Any]:
+    return {
+        "scenario_id": str(scenario["id"]),
+        "title": scenario.get("title"),
+        "sdk": sdk["name"],
+        "sdk_version": sdk.get("version", "latest"),
+        "backend": backend,
+        "status": "cancelled",
+        "duration_ms": 0,
+        "metrics": {},
+        "assertions": [],
+        "error": "run cancelled",
+        "logs": ["run cancelled by user before this job started"],
+    }
 
 
 def _skipped(scenario: Dict, sdk: Dict, backend: str, reason: str = None) -> Dict[str, Any]:
