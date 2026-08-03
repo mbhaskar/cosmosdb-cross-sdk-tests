@@ -86,7 +86,7 @@
 
 <div class="config">
   <label>Backend
-    <select id="backend"><option value="mock">mock</option><option value="emulator">emulator</option><option value="live">live</option></select>
+    <select id="backend"><option value="mock">mock</option><option value="emulator">emulator</option><option value="inmemory">inmemory</option><option value="live">live</option></select>
   </label>
   <label>Connection
     <select id="mode"><option value="direct">direct</option><option value="gateway">gateway</option></select>
@@ -125,6 +125,14 @@
       const live = be.value !== 'mock';
       document.getElementById('endpointWrap').style.display = live ? '' : 'none';
       document.getElementById('keyWrap').style.display = live ? '' : 'none';
+      // The in-memory emulator exposes only the Gateway V1 listener (no direct
+      // RNTBD endpoint), so pin + lock the Connection control to gateway for it.
+      if (be.value === 'inmemory') {
+        mode.value = 'gateway';
+        mode.disabled = true;
+      } else {
+        mode.disabled = false;
+      }
     }
     [be, mode, ep, key].forEach(el => el.addEventListener('input', persist));
     be.addEventListener('change', sync);

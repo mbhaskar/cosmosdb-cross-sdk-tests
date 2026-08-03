@@ -111,6 +111,13 @@ def resolve(config: Dict[str, Any], defaults: Dict[str, Any]) -> Tuple[Optional[
         resolved["enable_endpoint_discovery"] = config.get("enable_endpoint_discovery")
     elif "enable_endpoint_discovery" in block:
         resolved["enable_endpoint_discovery"] = block.get("enable_endpoint_discovery")
+
+    # The in-memory emulator only exposes the Gateway V1 (JSON REST) listener --
+    # there is no direct-mode (RNTBD/TCP) endpoint. The portal defaults the
+    # Connection control to "direct", so force gateway here to keep the tier
+    # correct regardless of how the run was launched (CLI or portal).
+    if backend == "inmemory":
+        resolved["connection_mode"] = "gateway"
     return resolved, None
 
 
