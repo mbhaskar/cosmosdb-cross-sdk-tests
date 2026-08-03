@@ -40,6 +40,50 @@ SCENARIOS_BY_ID: Dict[str, Dict[str, Any]] = {str(s["id"]): s for s in SCENARIOS
 store = Store(DB_PATH)
 _executor = ThreadPoolExecutor(max_workers=4)
 
+# Fault-injection (T-3xx) scenarios all route through ONE shared Toxiproxy +
+# ONE shared mitmproxy. Running them concurrently (the pool above allows up to 4
+# in flight) lets one scenario's armed fault bleed onto a sibling's traffic —
+# including its fixture create_client/create_container. This lock serializes the
+# critical section (pre-run proxy reset + dispatch) so only one fault scenario
+# ever holds the shared proxies at a time. Non-fault scenarios are unaffected and
+# still run concurrently.
+_fault_lock = threading.Lock()
+
+
+def _is_fault_scenario(scenario: Dict[str, Any]) -> bool:
+    """A scenario drives the shared fault proxies if it declares a
+    ``fault_injection`` block or is tagged ``fault-injection``."""
+    if scenario.get("fault_injection"):
+        return True
+    tags = scenario.get("tags") or []
+    return "fault-injection" in tags
+
+
+def _reset_shared_proxies(config: Dict[str, Any]) -> None:
+    """Best-effort clear of all armed faults on the shared Toxiproxy + mitmproxy
+    BEFORE a fault scenario runs.
+
+    Cleanup normally happens in the harness's ``executor.run()`` ``finally``, but
+    that is SKIPPED when a runner is killed at the subprocess timeout (e.g. a
+    scenario that hangs). The killed runner leaves toxics/L7 faults armed, which
+    then poison the next scenario. Resetting here (under ``_fault_lock``, so no
+    live scenario is mid-flight) guarantees each fault run starts from a clean
+    proxy state regardless of how the previous one ended."""
+    # Toxiproxy admin URL: honor the run config, fall back to proxy_manager's
+    # env/default. Safe to set here — callers hold _fault_lock so fault runs are
+    # serialized and this process-global env write can't race a sibling.
+    tox_url = config.get("toxiproxy_url")
+    if tox_url:
+        os.environ["TOXIPROXY_URL"] = tox_url.rstrip("/")
+    for proxy in ("cosmos", "cosmos-secondary"):
+        try:
+            proxy_manager.clear(proxy)
+        except proxy_manager.ProxyError:
+            # proxy may not exist / Toxiproxy not running for this run — ignore
+            pass
+    proxy_manager.clear_mitm(config.get("mitm_endpoint"))
+
+
 
 class SdkSel(BaseModel):
     name: str
@@ -208,11 +252,7 @@ def _execute_run(run_id: str, scenario_ids: List[str], sdks: List[Dict], config:
         job_config["mock_profile"] = MOCK_PROFILE
 
     futures = {
-        _executor.submit(
-            runner_dispatcher.dispatch,
-            sdk["name"], scenario, job_config, sdk.get("version", "latest"),
-            sdk.get("source", "published"),
-        ): (scenario, sdk)
+        _executor.submit(_run_job, scenario, sdk, job_config): (scenario, sdk)
         for scenario, sdk in jobs
     }
     for fut in as_completed(futures):
@@ -222,6 +262,24 @@ def _execute_run(run_id: str, scenario_ids: List[str], sdks: List[Dict], config:
     summary = _summarize(run_id)
     overall = "completed"
     store.finish_run(run_id, overall, summary)
+
+
+def _run_job(scenario: Dict, sdk: Dict, job_config: Dict) -> Dict[str, Any]:
+    """Dispatch one (scenario, sdk) job.
+
+    Fault-injection scenarios acquire ``_fault_lock`` and reset the shared proxies
+    first, so they run strictly one-at-a-time against a clean proxy state and can't
+    bleed armed faults onto each other. Non-fault scenarios dispatch directly and
+    keep running concurrently on the pool."""
+    version = sdk.get("version", "latest")
+    source = sdk.get("source", "published")
+    if _is_fault_scenario(scenario):
+        with _fault_lock:
+            _reset_shared_proxies(job_config)
+            return runner_dispatcher.dispatch(
+                sdk["name"], scenario, job_config, version, source)
+    return runner_dispatcher.dispatch(
+        sdk["name"], scenario, job_config, version, source)
 
 
 def _skipped(scenario: Dict, sdk: Dict, backend: str, reason: str = None) -> Dict[str, Any]:

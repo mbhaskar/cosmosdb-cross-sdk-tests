@@ -24,6 +24,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import ssl
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional
@@ -80,6 +81,34 @@ def clear(proxy: str = "cosmos") -> Dict[str, Any]:
     for tox in existing:
         _request("DELETE", f"/proxies/{proxy}/toxics/{tox['name']}")
     return {"proxy": proxy, "cleared": [t["name"] for t in existing]}
+
+
+def clear_mitm(endpoint: str) -> None:
+    """Best-effort clear of any armed Layer-7 mitmproxy faults / synthesized
+    topology on the given control endpoint.
+
+    Mirrors ``ProtocolFaultController.reset`` in the harness (POSTs the addon's
+    ``/__fault/clear`` + ``/__topology/clear`` control paths) but stays stdlib-only
+    so the orchestrator keeps no dependency on the harness package. The mitm
+    endpoint uses a self-signed cert and the control call carries no secrets, so
+    TLS verification is skipped. Failures are swallowed — the mitm layer may not
+    be part of every fault run.
+    """
+    if not endpoint:
+        return
+    base = endpoint.rstrip("/")
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    for path in ("/__fault/clear", "/__topology/clear"):
+        try:
+            req = urllib.request.Request(f"{base}{path}", data=b"", method="POST",
+                                         headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=10, context=ctx):
+                pass
+        except (urllib.error.URLError, OSError):
+            # best-effort: mitm not running / not used by this scenario
+            pass
 
 
 def activate(profile_id: str, proxy: Optional[str] = None) -> Dict[str, Any]:
