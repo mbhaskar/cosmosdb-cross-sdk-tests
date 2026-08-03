@@ -1,0 +1,57 @@
+id: "C-301"
+phase: 9
+section: "9.01"
+title: "In-memory emulator: a REAL partition split changes topology (4 -> 5)"
+description: |
+  Exercises the in-memory emulator's real control plane: a live partition split
+  changes the engine's physical topology 4 -> 5, observed on the wire. This is
+  impossible on the mitmproxy tier (which only fabricates a static pkranges
+  response) and prohibitively expensive on a real account (many partitions,
+  minutes-long splits).
+
+  Flow:
+    * step ``ranges_before`` reads the engine's raw ``/pkranges`` (4 ranges).
+    * timeline ``split_partition {partition_id: 0}`` calls the management REST API
+      (POST .../partitions/0/split), polls the long-running operation to
+      ``Succeeded``, and lets the routing map settle. Parent 0 splits into two
+      children at the midpoint EPK, each carrying the parent's lineage.
+    * step ``ranges_after`` re-reads the engine's raw ``/pkranges`` (5 ranges).
+
+  Assertions target ``read_pkranges`` -- the engine's ground-truth topology read
+  straight from the gateway -- NOT the SDK's ``read_feed_ranges``. The SDK's
+  routing-map cache coalesces freshly-split sibling children back into the parent
+  EPK span (so ``read_feed_ranges`` reports 4 until the split ages/warms), which
+  makes it a poor deterministic signal for "a split happened". The engine read is
+  exact and immediate, so this pilot proves the framework can *drive and observe*
+  a real topology change end-to-end.
+
+  Requires the in-memory emulator (management :49150 / gateway :49151); start with
+  ``scripts/run-inmemory-emulator.sh up``. Auto-namespaced fixture db keeps the
+  before/after counts deterministic across re-runs.
+tags: [inmemory, feedrange, split, control-plane, topology]
+backends: [inmemory]
+runners: [python, java]
+
+fixture:
+  database: "auto"
+  container:
+    id: "orders"
+    partition_key: "/customerId"
+
+timeline:
+  - after: ranges_before
+    event: split_partition
+    args: { partition_id: 0, wait: true }
+
+steps:
+  - id: ranges_before
+    action: read_pkranges
+    expect:
+      - { type: ok, name: pkranges_read_ok }
+      - { type: item_count, name: four_ranges_before, value: 4 }
+  - id: ranges_after
+    action: read_pkranges
+    expect:
+      - { type: ok, name: pkranges_reread_ok }
+      # Parent 0 split into two children => one net new physical range.
+      - { type: item_count, name: five_ranges_after, value: 5 }

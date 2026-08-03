@@ -3,7 +3,7 @@
 # The MVP defaults to the in-memory `mock` backend so the matrix runs with no
 # infrastructure. Switch to `emulator` or `live` to exercise the real SDKs.
 
-backend: mock            # mock | emulator | live
+backend: mock            # mock | emulator | inmemory | live
 connection_mode: direct  # direct | gateway
 consistency: Session
 
@@ -22,6 +22,34 @@ emulator:
   proxy_endpoint: "https://localhost:18081"   # Toxiproxy 'cosmos' route (L4)
   mitm_endpoint: "https://localhost:18091"    # mitmproxy front of chain (L7+L4)
   toxiproxy_url: "http://localhost:8474"       # Toxiproxy admin API
+
+# In-memory hosted emulator (Azure Cosmos DB Rust emulator, azure-sdk-for-rust
+# PR #4786). A NEW backend tier: a deterministic, memory-backed engine with a
+# REAL request/routing/RU state machine plus a control-plane management REST API
+# (partition split/merge, per-partition failover, replication pause/resume).
+# Unlike the mitm tier (which fabricates responses) this engine honors the data
+# it stores, so split/merge and feed-range assembly reflect real topology.
+#
+# The emulator itself speaks cleartext HTTP on loopback (Gateway V1, JSON REST)
+# and validates NO auth, so any key works. The data-plane gateway proxy in front
+# of it terminates TLS with a self-signed localhost leaf (the Java SDK forces
+# HTTPS for its gateway handshake), so the published endpoint is https; the
+# management channel stays plain http. Start it with:
+#   scripts/run-inmemory-emulator.sh up   (also rebuilds the Java trust store)
+inmemory:
+  endpoint: "https://localhost:49151"           # Gateway V1 (East US) data-plane over TLS
+  management_endpoint: "http://localhost:49150"  # control-plane management REST API (plain http)
+  # The gateway proxy terminates TLS with a self-signed localhost leaf (the Java
+  # SDK forces HTTPS for its gateway handshake). Python skips verification
+  # (tls_verify defaults off for inmemory); Java trusts the leaf via the injected
+  # JVM trust store (scripts/build-java-truststore.sh EMULATOR_PORT=49151).
+  # Endpoint discovery is pinned OFF so neither SDK chases the emulator's
+  # advertised http://127.0.0.1:<port> region URLs (which would bypass the TLS
+  # proxy); both stay pinned to the configured https endpoint.
+  enable_endpoint_discovery: false
+  # No auth is validated by the host; the well-known emulator key is sent purely
+  # to satisfy the SDKs' request-signing path.
+  key: "C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw=="
 
 live:
   endpoint: "${COSMOS_ENDPOINT}"   # supply via environment

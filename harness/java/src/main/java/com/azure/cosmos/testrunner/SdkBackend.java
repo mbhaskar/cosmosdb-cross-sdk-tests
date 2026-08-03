@@ -243,6 +243,48 @@ public class SdkBackend implements Backend {
         }
     }
 
+    @Override
+    public OpResult readPkranges(String dbId, String containerId) {
+        // Engine ground-truth: read the gateway's raw pkranges REST resource,
+        // bypassing the SDK routing cache entirely. The in-memory emulator serves
+        // cleartext HTTP and validates no credentials, so a bare GET suffices; the
+        // path carries no trailing slash (the gateway rejects those, and the
+        // normalizer only fixes SDK traffic). Returns one item per real range.
+        String url = endpoint.replaceAll("/+$", "")
+                + "/dbs/" + dbId + "/colls/" + containerId + "/pkranges";
+        try {
+            java.net.http.HttpClient hc = java.net.http.HttpClient.newBuilder()
+                    .connectTimeout(java.time.Duration.ofSeconds(10)).build();
+            java.net.http.HttpRequest req = java.net.http.HttpRequest.newBuilder()
+                    .uri(java.net.URI.create(url))
+                    .timeout(java.time.Duration.ofSeconds(15))
+                    .GET().build();
+            java.net.http.HttpResponse<String> resp =
+                    hc.send(req, java.net.http.HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() >= 400) {
+                return OpResult.fail(resp.statusCode(), "PkRangesError",
+                        "pkranges GET " + url + " -> " + resp.statusCode() + ": " + resp.body());
+            }
+            com.fasterxml.jackson.databind.JsonNode root = DIAG_MAPPER.readTree(resp.body());
+            com.fasterxml.jackson.databind.JsonNode ranges = root.get("PartitionKeyRanges");
+            List<Object> items = new ArrayList<>();
+            if (ranges != null && ranges.isArray()) {
+                for (com.fasterxml.jackson.databind.JsonNode r : ranges) {
+                    Map<String, Object> m = new java.util.LinkedHashMap<>();
+                    m.put("id", r.hasNonNull("id") ? r.get("id").asText() : null);
+                    m.put("min", r.hasNonNull("minInclusive") ? r.get("minInclusive").asText() : null);
+                    m.put("max", r.hasNonNull("maxExclusive") ? r.get("maxExclusive").asText() : null);
+                    items.add(m);
+                }
+            }
+            OpResult r = OpResult.ok(200);
+            r.items = items;
+            return r;
+        } catch (Exception e) {
+            return sdkError(e);
+        }
+    }
+
     private OpResult sdkError(Exception e) {
         int status = 0;
         String code = e.getClass().getSimpleName();

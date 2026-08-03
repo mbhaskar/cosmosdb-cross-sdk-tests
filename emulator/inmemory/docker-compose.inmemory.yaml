@@ -1,0 +1,36 @@
+# Dockerized Azure Cosmos DB Rust in-memory emulator host.
+#
+# Provides a NEW backend tier for the cross-SDK runner: a deterministic,
+# memory-backed Cosmos emulator with a REAL request/routing/RU state machine
+# and a control-plane management REST API (partition split/merge, per-partition
+# failover, replication pause/resume). Unlike the mitmproxy tier (which fakes
+# responses) this engine actually honors the data it stores, so split/merge and
+# feed-range assembly reflect real topology changes.
+#
+#   docker compose -f emulator/inmemory/docker-compose.inmemory.yaml up -d --build
+#   curl -s http://localhost:49150/health   # {"status":...,"gateway20Enabled":false}
+#   curl -s http://localhost:49150/account  # resolved topology
+#
+# Then run scenarios against the `inmemory` backend:
+#   python scripts/run-matrix.py --backend inmemory --specs specs/phase08-control-plane
+#
+# See emulator/inmemory/docker-compose.inmemory.yaml for the two published
+# ports, and scripts/run-inmemory-emulator.sh for an up/down helper.
+
+services:
+  inmemory-emulator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cosmos-inmemory-emulator
+    ports:
+      - "49150:49150"   # management REST API (control-plane)
+      - "49151:49151"   # Gateway V1 (East US) data-plane, JSON REST over TLS (https)
+    healthcheck:
+      # Inside the container, localhost == 127.0.0.1 hits the emulator directly
+      # (bypassing the socat bridges), which is exactly what we want to probe.
+      test: ["CMD-SHELL", "curl -sf http://localhost:49150/health >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s

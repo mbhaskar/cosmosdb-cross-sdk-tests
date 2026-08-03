@@ -175,6 +175,22 @@ public class MockBackend implements Backend {
         return r;
     }
 
+    @Override
+    public OpResult readPkranges(String dbId, String containerId) {
+        // The offline mock has no real gateway to query; the raw-pkranges topology
+        // scenarios (C-301) are inmemory-emulator-only. Mirror readFeedRanges with
+        // one full range so any accidental mock run stays well-defined.
+        OpResult r = OpResult.ok(200);
+        java.util.List<Object> items = new java.util.ArrayList<>();
+        Map<String, Object> m = new java.util.LinkedHashMap<>();
+        m.put("id", "0");
+        m.put("min", "");
+        m.put("max", "FF");
+        items.add(m);
+        r.items = items;
+        return r;
+    }
+
     // -- interpreter ------------------------------------------------------ //
 
     @SuppressWarnings("unchecked")

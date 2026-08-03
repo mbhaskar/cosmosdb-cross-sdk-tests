@@ -106,6 +106,17 @@ class Backend:
         all pkrange pages. ``items`` carries one entry per returned range."""
         raise NotImplementedError
 
+    def read_pkranges(self, db_id: str, container_id: str, **kwargs) -> OpResult:
+        """Read the *engine's* raw ``/pkranges`` for the container (one item per
+        physical partition key range) directly from the gateway, bypassing the
+        SDK's routing-map cache.
+
+        Where ``read_feed_ranges`` reflects what the SDK *believes* (and may
+        coalesce freshly-split siblings back into the parent EPK span), this
+        returns the engine's ground-truth topology. Used by the in-memory
+        emulator tier to deterministically observe a real split/merge."""
+        raise NotImplementedError
+
     def seed_items(self, db_id: str, container_id: str, count: int, template: Dict[str, Any], **kwargs) -> OpResult:
         """Bulk-seed ``count`` items by expanding ``{n}`` in string template
         values (n = 1..count). Implemented once here over ``create_item`` so it
@@ -738,11 +749,55 @@ class SdkBackend(Backend):
         # pkranges page (following x-ms-continuation) and returns one FeedRange
         # per partition key range. Against a mitmproxy-synthesized topology this
         # yields M ranges over a single-partition emulator.
+        #
+        # ``force_refresh`` rebuilds the CosmosClient first so the routing cache
+        # is cold. A real split changes the gateway's pkranges, but an already-
+        # warm client keeps serving its cached routing map until a 410 GONE
+        # invalidates it; a cold client observes the new topology immediately.
+        # This makes "split then re-read" deterministic on the in-memory tier.
         try:
             self._last_diag = None
+            if kwargs.get("force_refresh"):
+                self.create_client(self._connection_mode or "gateway")
             ranges = list(self._container(db_id, container_id).read_feed_ranges())
             items = [{"id": str(i), "feed_range": str(r)} for i, r in enumerate(ranges)]
             return OpResult(ok=True, status_code=200, items=items, diagnostics=self._last_diag)
+        except Exception as exc:  # noqa: BLE001
+            return _sdk_error(exc, self.metrics)
+
+    def read_pkranges(self, db_id, container_id, **kwargs) -> OpResult:
+        # Engine ground-truth: read the gateway's raw pkranges REST resource,
+        # bypassing the SDK routing cache entirely. The in-memory emulator
+        # validates no credentials, so a bare GET suffices; the path carries no
+        # trailing slash (the gateway rejects those, and the normalizer only
+        # fixes SDK traffic). The gateway proxy terminates TLS with a self-signed
+        # localhost leaf, so verification is disabled here in lockstep with the
+        # SDK client (verify_tls off for inmemory). Returns one item per range.
+        import urllib.request
+        import urllib.error
+        import ssl
+        url = f"{self.endpoint.rstrip('/')}/dbs/{db_id}/colls/{container_id}/pkranges"
+        ctx = None
+        if url.lower().startswith("https") and not self.verify_tls:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        try:
+            self._last_diag = None
+            with urllib.request.urlopen(url, timeout=15, context=ctx) as resp:
+                payload = json.loads(resp.read() or b"{}")
+            ranges = payload.get("PartitionKeyRanges", [])
+            items = [
+                {"id": str(r.get("id")),
+                 "min": r.get("minInclusive"), "max": r.get("maxExclusive"),
+                 "parents": r.get("parents", [])}
+                for r in ranges
+            ]
+            return OpResult(ok=True, status_code=200, items=items)
+        except urllib.error.HTTPError as exc:
+            return OpResult(ok=False, status_code=exc.code,
+                            error=f"pkranges GET {url} -> {exc.code}: "
+                                  f"{exc.read().decode(errors='replace')}")
         except Exception as exc:  # noqa: BLE001
             return _sdk_error(exc, self.metrics)
 
@@ -800,7 +855,7 @@ def make_backend(config: Dict[str, Any]) -> Backend:
     # account is itself fronted by the local proxy.
     tls_verify = config.get("tls_verify")
     if tls_verify is None:
-        tls_verify = not (backend == "emulator" or config.get("proxy_endpoint"))
+        tls_verify = not (backend in ("emulator", "inmemory") or config.get("proxy_endpoint"))
     # None -> SDK default (discovery on). The executor sets this False for
     # single-region transport-fault runs so the client stays on the proxy
     # endpoint instead of the emulator's self-advertised address.

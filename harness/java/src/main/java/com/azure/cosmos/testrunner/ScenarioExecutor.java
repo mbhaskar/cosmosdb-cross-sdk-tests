@@ -33,6 +33,7 @@ public class ScenarioExecutor {
     private final Map<String, Object> faultInjection;
     private final ProxyFaultController faultController;      // L4 transport (Toxiproxy)
     private final ProtocolFaultController protocolController; // L7 protocol (mitmproxy)
+    private final ManagementController managementController;  // control plane (inmemory emulator REST)
     // timeline events grouped by "<when>\u0000<stepId>".
     private final Map<String, List<Map<String, Object>>> timeline;
     // latency(ms) + resource samples keyed by scope (loop id).
@@ -45,6 +46,9 @@ public class ScenarioExecutor {
     private static final java.util.Set<String> PROTOCOL_EVENTS = new java.util.HashSet<>(java.util.Arrays.asList(
             "net_throttle_window", "throttle_window_clear", "inject_fault", "fault_clear",
             "advertise_pkranges", "pkranges_clear"));
+    private static final java.util.Set<String> MANAGEMENT_EVENTS = new java.util.HashSet<>(java.util.Arrays.asList(
+            "split_partition", "merge_partitions", "pause_replication", "resume_replication",
+            "set_per_partition_failover"));
 
     @SuppressWarnings("unchecked")
     public ScenarioExecutor(Map<String, Object> scenario, Map<String, Object> config,
@@ -99,6 +103,7 @@ public class ScenarioExecutor {
         this.timeline = indexTimeline((List<Map<String, Object>>) scenario.get("timeline"));
         this.faultController = makeFaultController();
         this.protocolController = makeProtocolController();
+        this.managementController = makeManagementController();
     }
 
     @SuppressWarnings("unchecked")
@@ -141,6 +146,18 @@ public class ScenarioExecutor {
         }
         Object ep = firstNonNull(config.get("mitm_endpoint"), config.get("proxy_endpoint"), config.get("endpoint"));
         return new ProtocolFaultController(ep == null ? null : String.valueOf(ep));
+    }
+
+    private ManagementController makeManagementController() {
+        // Control-plane ops are not "faults", so this is built whenever a
+        // management endpoint is resolved (independent of fault_injection), except
+        // on the offline mock (which has no real engine to drive).
+        Object ep = config.get("management_endpoint");
+        if (ep == null || String.valueOf(ep).isEmpty()
+                || "mock".equals(String.valueOf(config.getOrDefault("backend", "mock")))) {
+            return null;
+        }
+        return new ManagementController(String.valueOf(ep));
     }
 
     private static Object firstNonNull(Object... vals) {
@@ -417,6 +434,15 @@ public class ScenarioExecutor {
                     continue;
                 }
                 faultController.apply(event, args);
+                log("  timeline[" + when + " " + stepId + "]: " + event + " " + args);
+                continue;
+            }
+            // Real control-plane topology ops (in-memory emulator management REST).
+            // Only intercept when a management controller exists; otherwise fall
+            // through (mock has no real engine to drive).
+            if (MANAGEMENT_EVENTS.contains(event) && managementController != null) {
+                managementController.apply(event, args,
+                        str(ctx.get("db")), str(ctx.get("container")));
                 log("  timeline[" + when + " " + stepId + "]: " + event + " " + args);
                 continue;
             }

@@ -38,6 +38,17 @@ public interface Backend {
     OpResult readFeedRanges(String dbId, String containerId);
 
     /**
+     * Read the <em>engine's</em> raw {@code /pkranges} for the container (one item
+     * per physical partition key range) directly from the gateway, bypassing the
+     * SDK's routing-map cache. Where {@link #readFeedRanges} reflects what the SDK
+     * believes (and may coalesce freshly-split siblings back into the parent EPK
+     * span, or fail entirely against this emulator's gateway), this returns the
+     * engine's ground-truth topology. Used by the in-memory emulator tier to
+     * deterministically observe a real split/merge (mirrors Python read_pkranges).
+     */
+    OpResult readPkranges(String dbId, String containerId);
+
+    /**
      * Bulk-seed {@code count} items by expanding {@code {n}} in string template
      * values (n = 1..count). Implemented once here over {@link #createItem} so it
      * behaves identically on every backend (mirrors the Python Backend.seed_items).

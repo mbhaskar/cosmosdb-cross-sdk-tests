@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import ssl
+import time
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional
@@ -194,3 +195,115 @@ class ProtocolFaultController:
             self._post("/__topology/clear")
         except ProxyError:
             pass
+
+
+class ManagementController:
+    """Drives the in-memory Rust emulator's REAL control plane via its management
+    REST API (see ``emulator/inmemory``; contract from azure-sdk-for-rust
+    ``azure_data_cosmos_emulator/src/management.rs``).
+
+    Unlike the mitmproxy topology *synthesis* used by C-220 (which fabricates a
+    pkranges response so the SDK's cache assembles M ranges over a single-
+    partition emulator), this controller asks the real engine to change its
+    physical topology: split/merge partitions, pause/resume region replication,
+    toggle per-partition failover. The gateway then advertises the new
+    ``/pkranges`` for real, and an unmodified SDK observes it.
+
+    Cleartext HTTP; the emulator validates no credentials. Control channel is the
+    management endpoint (``$COSMOS_MANAGEMENT_ENDPOINT`` / the resolved
+    ``management_endpoint``), distinct from the data-plane gateway endpoint.
+    """
+
+    #: Extra settle time after an op reports terminal, so the gateway's pkranges
+    #: read path reflects the new routing map before the next SDK read.
+    _SETTLE_SECONDS = 1.0
+    _POLL_TIMEOUT = 30.0
+    _POLL_INTERVAL = 0.25
+
+    def __init__(self, control_endpoint: Optional[str] = None):
+        self.control_endpoint = (
+            control_endpoint
+            or os.environ.get("COSMOS_MANAGEMENT_ENDPOINT", "http://localhost:49150")
+        ).rstrip("/")
+
+    def _request(self, method: str, path: str, body: Optional[dict] = None) -> Any:
+        url = f"{self.control_endpoint}{path}"
+        data = json.dumps(body).encode() if body is not None else None
+        headers = {"Content-Type": "application/json"} if data is not None else {}
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                raw = resp.read()
+                return json.loads(raw) if raw else None
+        except urllib.error.HTTPError as exc:
+            raise ProxyError(
+                f"{method} {path} -> HTTP {exc.code}: {exc.read().decode(errors='replace')}"
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise ProxyError(
+                f"cannot reach emulator management API at {self.control_endpoint}: "
+                f"{exc.reason}. Start emulator/inmemory (see "
+                f"scripts/run-inmemory-emulator.sh) first."
+            ) from exc
+
+    def _await_operation(self, operation_id: str) -> Dict[str, Any]:
+        """Poll ``GET /operations/{id}`` until the long-running op is terminal."""
+        deadline = time.time() + self._POLL_TIMEOUT
+        last: Dict[str, Any] = {}
+        while time.time() < deadline:
+            last = self._request("GET", f"/operations/{operation_id}") or {}
+            if last.get("status") in ("Succeeded", "Failed"):
+                if last.get("status") == "Failed":
+                    raise ProxyError(f"operation {operation_id} failed: {last}")
+                # Let the gateway's routing map catch up before the next read.
+                time.sleep(self._SETTLE_SECONDS)
+                return last
+            time.sleep(self._POLL_INTERVAL)
+        raise ProxyError(f"operation {operation_id} did not terminate within "
+                         f"{self._POLL_TIMEOUT}s (last={last})")
+
+    def apply(self, event: str, args: Dict[str, Any],
+              db_id: Optional[str] = None, container_id: Optional[str] = None) -> None:
+        args = args or {}
+        if event == "split_partition":
+            if not (db_id and container_id):
+                raise ProxyError("split_partition needs a fixture db + container")
+            pid = args.get("partition_id", 0)
+            body: Dict[str, Any] = {}
+            if args.get("mode") is not None:
+                body["mode"] = args["mode"]           # midpoint | epk | storage
+            if args.get("epk") is not None:
+                body["epk"] = args["epk"]
+            op = self._request(
+                "POST",
+                f"/databases/{db_id}/containers/{container_id}/partitions/{pid}/split",
+                body or None,
+            ) or {}
+            if args.get("wait", True) and op.get("operationId"):
+                self._await_operation(op["operationId"])
+        elif event == "merge_partitions":
+            if not (db_id and container_id):
+                raise ProxyError("merge_partitions needs a fixture db + container")
+            body = {"partitions": args["partitions"]} if args.get("partitions") else None
+            op = self._request(
+                "POST",
+                f"/databases/{db_id}/containers/{container_id}/partitions/merge",
+                body,
+            ) or {}
+            if args.get("wait", True) and op.get("operationId"):
+                self._await_operation(op["operationId"])
+        elif event in ("pause_replication", "resume_replication"):
+            region = args["region"]
+            verb = "pause" if event == "pause_replication" else "resume"
+            self._request("POST", f"/regions/{region}/replication/{verb}")
+        elif event == "set_per_partition_failover":
+            self._request("PUT", "/config/per-partition-failover",
+                          {"enabled": bool(args.get("enabled", True))})
+        else:
+            raise ValueError(f"unknown management event '{event}'")
+
+    def reset(self) -> None:
+        # The management plane has no blanket "undo"; topology changes persist for
+        # the emulator's lifetime. Auto-namespaced fixture databases keep each run
+        # isolated, so reset is a best-effort no-op.
+        return None

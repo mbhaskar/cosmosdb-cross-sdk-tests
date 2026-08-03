@@ -1,0 +1,38 @@
+id: "C-300"
+phase: 9
+section: "9.00"
+title: "In-memory emulator: SDK reads a REAL multi-partition topology"
+description: |
+  Baseline for the in-memory Rust emulator tier (emulator/inmemory, built from
+  azure-sdk-for-rust ``azure_data_cosmos_emulator``). Where C-220 *synthesizes* a
+  pkranges topology in mitmproxy over a single-partition emulator, this tier runs
+  the real engine: a freshly SDK-created container is physically partitioned, and
+  an unmodified SDK reads the genuine ``/pkranges`` the engine computes.
+
+  ``read_feed_ranges`` returns one FeedRange per real physical partition. A fresh
+  container on this emulator defaults to 4 physical partitions, so the SDK must
+  assemble exactly 4 real ranges -- no interception, no fabrication.
+
+  Requires the in-memory emulator running over cleartext HTTP gateway on
+  :49151 (management on :49150); start it with
+  ``scripts/run-inmemory-emulator.sh up``. Gateway-mode V1 (JSON REST); no
+  mitmproxy / Toxiproxy in this tier's path. The auto-namespaced fixture database
+  keeps each run isolated so the count is deterministic across re-runs.
+tags: [inmemory, feedrange, pkranges, topology, control-plane]
+backends: [inmemory]
+runners: [python]
+
+fixture:
+  database: "auto"
+  container:
+    id: "orders"
+    partition_key: "/customerId"
+
+steps:
+  - id: list_ranges
+    action: read_feed_ranges
+    expect:
+      - { type: ok, name: pkranges_read_ok }
+      # 4 REAL physical partitions reported by the engine (contrast C-220, which
+      # fakes this over a single-partition emulator via mitmproxy).
+      - { type: item_count, name: four_real_ranges, value: 4 }

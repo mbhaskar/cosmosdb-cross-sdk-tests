@@ -38,7 +38,7 @@ def load_defaults(path: str) -> Dict[str, Any]:
     except Exception:
         return {}
     out: Dict[str, Any] = {}
-    for backend in ("emulator", "live"):
+    for backend in ("emulator", "inmemory", "live"):
         block = data.get(backend) or {}
         out[backend] = {k: _expand_env(v) for k, v in block.items()}
     return out
@@ -93,6 +93,24 @@ def resolve(config: Dict[str, Any], defaults: Dict[str, Any]) -> Tuple[Optional[
         resolved["toxiproxy_url"] = toxiproxy_url
     if mitm_endpoint:
         resolved["mitm_endpoint"] = mitm_endpoint
+
+    # In-memory hosted emulator control channel (management REST API). Only the
+    # `inmemory` backend uses it; carries the split/merge/failover/replication
+    # endpoint through to the harness control client.
+    management_endpoint = _first_nonempty(
+        config.get("management_endpoint"), os.environ.get("COSMOS_MANAGEMENT_ENDPOINT"),
+        block.get("management_endpoint"))
+    if management_endpoint:
+        resolved["management_endpoint"] = management_endpoint
+
+    # Endpoint-discovery toggle passthrough. The inmemory emulator advertises
+    # http://127.0.0.1:<port> region URLs that bypass the TLS gateway proxy, so
+    # its block pins discovery OFF to keep both SDKs on the configured https
+    # endpoint. Honour a request override first, then the backend block.
+    if "enable_endpoint_discovery" in config:
+        resolved["enable_endpoint_discovery"] = config.get("enable_endpoint_discovery")
+    elif "enable_endpoint_discovery" in block:
+        resolved["enable_endpoint_discovery"] = block.get("enable_endpoint_discovery")
     return resolved, None
 
 

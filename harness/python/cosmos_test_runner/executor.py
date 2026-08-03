@@ -140,6 +140,11 @@ class ScenarioRunner:
         self.fault_controller = self._make_fault_controller()
         # Lazily-built mitmproxy controller for L7 protocol verbs (throttle window).
         self.protocol_controller = self._make_protocol_controller()
+        # Lazily-built management-REST controller for the in-memory emulator's
+        # real control plane (split/merge/replication). Built whenever a
+        # management endpoint is resolved -- these are control-plane operations,
+        # not "faults", so they don't require a fault_injection block.
+        self.management_controller = self._make_management_controller()
 
     def _make_fault_controller(self):
         if not self.fault_injection or self.config.get("backend") == "mock":
@@ -168,6 +173,16 @@ class ScenarioRunner:
                     or self.config.get("proxy_endpoint")
                     or self.config.get("endpoint"))
         return ProtocolFaultController(control_endpoint=endpoint)
+
+    def _make_management_controller(self):
+        endpoint = self.config.get("management_endpoint")
+        if not endpoint or self.config.get("backend") == "mock":
+            return None
+        try:
+            from .faults import ManagementController
+        except Exception:  # noqa: BLE001
+            return None
+        return ManagementController(control_endpoint=endpoint)
 
     def _log(self, msg: str) -> None:
         line = f"[{_now_iso()}] {msg}"
@@ -327,6 +342,9 @@ class ScenarioRunner:
     _PROTOCOL_EVENTS = {"net_throttle_window", "throttle_window_clear",
                         "inject_fault", "fault_clear",
                         "advertise_pkranges", "pkranges_clear"}
+    _MANAGEMENT_EVENTS = {"split_partition", "merge_partitions",
+                          "pause_replication", "resume_replication",
+                          "set_per_partition_failover"}
 
     def _fire_events(self, when: str, step_id) -> None:
         if not step_id:
@@ -341,6 +359,17 @@ class ScenarioRunner:
                               f"(no protocol controller; needs emulator/live + mitmproxy)")
                     continue
                 self.protocol_controller.apply(event, args)
+                self._log(f"  timeline[{when} {step_id}]: {event} {args or ''}")
+                continue
+            # Real control-plane topology ops (in-memory emulator management REST).
+            # Only intercept when a management controller exists; otherwise fall
+            # through so the offline mock's simulated control_event (which also
+            # models split_partition as a 410->refresh) still fires.
+            if event in self._MANAGEMENT_EVENTS and self.management_controller is not None:
+                self.management_controller.apply(
+                    event, args,
+                    db_id=self.ctx.get("db"), container_id=self.ctx.get("container"),
+                )
                 self._log(f"  timeline[{when} {step_id}]: {event} {args or ''}")
                 continue
             # L4 transport faults (Toxiproxy) vs mock control-plane faults.

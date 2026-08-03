@@ -78,14 +78,28 @@ else
   echo "warn: mitmproxy CA not found at $MITM_CA (run mitmproxy once to generate it, or set MITM_CA=...)"
 fi
 
-# 2) Emulator leaf cert, fetched straight off the running gateway.
+# 2) Emulator leaf cert, fetched straight off the running gateway. The gateway
+# proxy may still be binding its TLS listener for a moment after the container
+# reports healthy, and macOS LibreSSL's s_client can transiently yield nothing,
+# so retry a few times before giving up.
 TMP_PEM="$(mktemp)"
 trap 'rm -f "$TMP_PEM"' EXIT
-if openssl s_client -connect "${EMULATOR_HOST}:${EMULATOR_PORT}" -servername "${EMULATOR_HOST}" \
-      </dev/null 2>/dev/null | openssl x509 >"$TMP_PEM" 2>/dev/null && [[ -s "$TMP_PEM" ]]; then
+scrape_leaf() {
+  : >"$TMP_PEM"
+  openssl s_client -connect "${EMULATOR_HOST}:${EMULATOR_PORT}" -servername "${EMULATOR_HOST}" \
+    </dev/null 2>/dev/null | openssl x509 >"$TMP_PEM" 2>/dev/null
+  [[ -s "$TMP_PEM" ]]
+}
+leaf_ok=""
+for _ in $(seq 1 10); do
+  if scrape_leaf; then leaf_ok=1; break; fi
+  sleep 1
+done
+if [[ -n "$leaf_ok" ]]; then
   import_cert "cosmos-emulator" "$TMP_PEM"
 else
-  echo "warn: could not fetch emulator cert from ${EMULATOR_HOST}:${EMULATOR_PORT} (is it running?)"
+  echo "warn: could not fetch emulator cert from ${EMULATOR_HOST}:${EMULATOR_PORT} after 10 tries" >&2
+  echo "      (is the gateway serving TLS there? try: openssl s_client -connect ${EMULATOR_HOST}:${EMULATOR_PORT})" >&2
 fi
 
 echo

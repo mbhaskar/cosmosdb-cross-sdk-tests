@@ -53,6 +53,8 @@ public final class StepHandlers {
                 return backend.deleteDatabase(str(params.get("id")));
             case "read_feed_ranges":
                 return backend.readFeedRanges(db, container);
+            case "read_pkranges":
+                return backend.readPkranges(db, container);
             default:
                 return OpResult.fail(0, "UnknownAction", "unknown action '" + action + "'");
         }

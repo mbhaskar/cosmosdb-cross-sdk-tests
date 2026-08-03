@@ -73,7 +73,7 @@ def main(argv: List[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("--backend", default="mock", choices=["mock", "emulator", "live"],
+    ap.add_argument("--backend", default="mock", choices=["mock", "emulator", "inmemory", "live"],
                     help="backend tier to exercise (default: mock)")
     ap.add_argument("--sdks", default="both",
                     help="comma-separated SDKs or 'both' (default: both)")
