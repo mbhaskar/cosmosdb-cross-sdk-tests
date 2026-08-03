@@ -122,9 +122,13 @@
       }));
     }
     function sync(){
-      const live = be.value !== 'mock';
-      document.getElementById('endpointWrap').style.display = live ? '' : 'none';
-      document.getElementById('keyWrap').style.display = live ? '' : 'none';
+      // Endpoint/key are only entered by hand for a live account. The emulator
+      // and inmemory tiers resolve their endpoint/key from config/default.yaml
+      // server-side, so hiding the fields (and not sending them, see reqBody)
+      // prevents a stale live endpoint left in the box from overriding them.
+      const needsCreds = be.value === 'live';
+      document.getElementById('endpointWrap').style.display = needsCreds ? '' : 'none';
+      document.getElementById('keyWrap').style.display = needsCreds ? '' : 'none';
       // The in-memory emulator exposes only the Gateway V1 listener (no direct
       // RNTBD endpoint), so pin + lock the Connection control to gateway for it.
       if (be.value === 'inmemory') {
@@ -239,7 +243,10 @@ function renderRows() {
 
 function reqBody(scenarioIds, sdkNames) {
   const cfg = { backend: document.getElementById('backend').value, connection_mode: document.getElementById('mode').value };
-  if (cfg.backend !== 'mock') {
+  // Only a live account takes a hand-entered endpoint/key. emulator/inmemory
+  // resolve theirs from config/default.yaml server-side; never forward the box
+  // contents for them, or a stale live endpoint would override the local tier.
+  if (cfg.backend === 'live') {
     const ep = document.getElementById('endpoint').value.trim();
     const key = document.getElementById('key').value.trim();
     if (ep) cfg.endpoint = ep;
