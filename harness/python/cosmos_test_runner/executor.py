@@ -403,16 +403,30 @@ class ScenarioRunner:
             sdk = str(self.config.get("sdk", "python"))
             db_id = f"mvp-{self.scenario.get('id')}-{sdk}-{self.run_id}"
         self.ctx["db"] = db_id
+
+        # Backend bootstrap calls return an OpResult (ok=False on failure) rather
+        # than raising, so a transient connect failure here used to be swallowed:
+        # the fixture logged "fixture ready" and the first real step then hit a
+        # None client and surfaced a cryptic ``AttributeError`` with status 0.
+        # Surface the real cause instead by failing the fixture fast.
+        def _require(op, what):
+            if op is not None and not getattr(op, "ok", True):
+                detail = getattr(op, "error", None) or getattr(op, "error_code", None) or "unknown error"
+                raise RuntimeError(f"fixture setup failed at {what}: {detail}")
+            return op
+
         # An eager client is created so bootstrap metrics are populated.
-        self.backend.create_client(connection_mode=self.ctx["connection_mode"])
-        self.backend.create_database(db_id, create_if_not_exists=True)
+        _require(self.backend.create_client(connection_mode=self.ctx["connection_mode"]),
+                 "create_client")
+        _require(self.backend.create_database(db_id, create_if_not_exists=True),
+                 "create_database")
         cont = fixture.get("container")
         if cont:
             self.ctx["container"] = cont["id"]
-            self.backend.create_container(
+            _require(self.backend.create_container(
                 db_id, cont["id"], cont.get("partition_key", "/pk"),
                 create_if_not_exists=True,
-            )
+            ), "create_container")
         self._log(f"fixture ready: db={db_id} container={self.ctx.get('container')}")
 
     def _teardown_fixture(self, fixture) -> None:
