@@ -148,6 +148,21 @@ runners stay byte-for-byte identical.
 
 ---
 
+## Prerequisites
+
+| Tool | Version | Needed for |
+| --- | --- | --- |
+| Python | 3.9+ (CI uses 3.11) | orchestrator, runner, `run-matrix.py` / `compare.py` |
+| Java (JDK) | 17+ (21 also verified) | Java runner (`mvn package`) |
+| Maven | 3.6+ | building the Java shaded jar |
+| Docker | any recent | `inmemory` and `emulator` backend tiers only |
+| `keytool` / `openssl` | bundled with JDK / OS | Java trust store for the emulator tiers |
+
+Only Python is required for the default **`mock`** backend — it needs no Docker,
+no account, and no Java (skip the Java runner and the matrix runs Python-only).
+Add Java + Maven to run the cross-SDK matrix, and Docker for the `inmemory` /
+`emulator` tiers.
+
 ## Quick start
 
 ```bash
@@ -323,6 +338,8 @@ config/           default.yaml
 
 ## Environment notes
 
-Verified on macOS arm64 with Python 3.9 and Java 21 + Maven. Node and Docker
-were not required: the dashboard is dependency-free static HTML, and the `mock`
-backend removes the need for the Cosmos emulator to demo the platform.
+Verified on macOS arm64 with Python 3.9 and Java 21 + Maven; CI runs Python
+3.11 + JDK 17 on Linux. **Docker** is required only for the `inmemory` and
+`emulator` backend tiers — the `mock` backend (the default) runs the whole
+pipeline with no Docker and no Cosmos account, and the dashboard is
+dependency-free static HTML.
