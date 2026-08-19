@@ -1,0 +1,71 @@
+id: "C-313"
+phase: 10
+section: "10.13"
+title: "Session consistency: SDK read-your-writes with session-token propagation"
+description: |
+  Tests the SDK's session-consistency contract -- a client/control-plane behavior,
+  not a stored-value check. Under Session consistency the SDK must carry the
+  session token it received on a write forward onto the next read so the client
+  observes its own writes (read-your-writes) and monotonic reads.
+
+  Flow:
+    * ``session_client`` re-creates the CosmosClient with consistency_level=Session.
+    * ``write`` creates an item; the response must carry x-ms-session-token
+      (evidence the SDK is on the session path).
+    * ``read`` immediately reads the same item back and must see v=1
+      (read-your-writes; the token was echoed forward).
+    * ``update`` replaces to v=2; ``read_again`` must see v=2 (monotonic).
+
+  Runs on the vNext emulator (gateway :8081). No fault injection.
+tags: [emulator, control-plane, session, consistency, read-your-writes, sdk-reaction]
+backends: [emulator]
+runners: [python, java]
+
+fixture:
+  database: "auto"
+  container:
+    id: "orders"
+    partition_key: "/customerId"
+
+steps:
+  - id: session_client
+    action: create_client
+    params:
+      connection_mode: gateway
+      consistency_level: Session
+    expect:
+      - { type: ok, name: session_client_ok }
+
+  - id: write
+    action: create_item
+    params:
+      item: { id: "s-1", customerId: "s-1", v: 1 }
+    expect:
+      - { type: ok, name: write_ok }
+      # SUT: the write response carried a session token (session path engaged).
+      - { type: diagnostic_present, name: session_token_issued, key: "x-ms-session-token" }
+
+  - id: read
+    action: read_item
+    params: { id: "s-1", partition_key: "s-1" }
+    expect:
+      # SUT: read-your-writes -- the SDK saw its own write under session consistency.
+      - { type: ok, name: read_ok }
+      - { type: field_equals, name: reads_own_write, path: item.v, value: 1 }
+
+  - id: update
+    action: replace_item
+    params:
+      id: "s-1"
+      partition_key: "s-1"
+      item: { id: "s-1", customerId: "s-1", v: 2 }
+    expect:
+      - { type: ok, name: update_ok }
+
+  - id: read_again
+    action: read_item
+    params: { id: "s-1", partition_key: "s-1" }
+    expect:
+      # SUT: monotonic read -- never observes a value older than the last write.
+      - { type: ok, name: read_again_ok }
+      - { type: field_equals, name: monotonic_read, path: item.v, value: 2 }

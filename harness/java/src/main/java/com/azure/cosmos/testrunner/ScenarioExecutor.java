@@ -355,6 +355,7 @@ public class ScenarioExecutor {
         context.put("latency", latencySamples);
         context.put("resource", resourceSamples);
         context.put("scope", scope);
+        context.put("steps", ctx.get("steps"));
         Object id = step.get("id");
         List<Map<String, Object>> expect = (List<Map<String, Object>>) step.get("expect");
         for (Map<String, Object> outc : Assertions.evaluate(expect, result, backend, context)) {

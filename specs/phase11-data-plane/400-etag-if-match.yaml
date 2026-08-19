@@ -1,0 +1,77 @@
+id: "D-400"
+phase: 11
+section: "11.00"
+title: "Optimistic concurrency: stale ETag (If-Match) is rejected with 412"
+description: |
+  Tests the SDK's optimistic-concurrency path end to end. A replace carrying a stale
+  ETag under an If-Match precondition must be rejected by the service with 412
+  PreconditionFailed, while a replace carrying the current ETag must succeed. This
+  is a real SDK behavior: the SDK translates the ETag + match-condition into the
+  If-Match header and surfaces the 412 as a failure.
+
+  Flow:
+    * ``create`` writes v=1 (its response ETag is captured as ${steps.create.item._etag}).
+    * ``bump`` replaces to v=2 with no precondition -- this advances the server ETag,
+      making the create-time ETag stale.
+    * ``stale_replace`` replaces to v=3 using If-Match=<create ETag> => must fail 412.
+    * ``read_current`` fetches the live ETag.
+    * ``good_replace`` replaces to v=4 using If-Match=<current ETag> => must succeed.
+
+  Runs on the vNext emulator (gateway :8081). Also live-safe.
+tags: [emulator, data-plane, etag, if-match, optimistic-concurrency]
+backends: [emulator, live]
+runners: [python, java]
+
+fixture:
+  database: "auto"
+  container:
+    id: "docs"
+    partition_key: "/pk"
+
+steps:
+  - id: create
+    action: create_item
+    params:
+      item: { id: "e-1", pk: "e-1", v: 1 }
+    expect:
+      - { type: ok, name: create_ok }
+
+  - id: bump
+    action: replace_item
+    params:
+      id: "e-1"
+      partition_key: "e-1"
+      item: { id: "e-1", pk: "e-1", v: 2 }
+    expect:
+      - { type: ok, name: bump_ok }
+
+  - id: stale_replace
+    action: replace_item
+    params:
+      id: "e-1"
+      partition_key: "e-1"
+      item: { id: "e-1", pk: "e-1", v: 3 }
+      if_match: "${steps.create.item._etag}"
+    expect:
+      # SUT: stale If-Match ETag => 412 PreconditionFailed.
+      - { type: error_status, name: stale_etag_rejected_412, value: 412 }
+
+  - id: read_current
+    action: read_item
+    params: { id: "e-1", partition_key: "e-1" }
+    expect:
+      - { type: ok, name: read_current_ok }
+      # Guard: bump won; the stale replace did NOT apply.
+      - { type: field_equals, name: value_still_2, path: item.v, value: 2 }
+
+  - id: good_replace
+    action: replace_item
+    params:
+      id: "e-1"
+      partition_key: "e-1"
+      item: { id: "e-1", pk: "e-1", v: 4 }
+      if_match: "${steps.read_current.item._etag}"
+    expect:
+      # SUT: current If-Match ETag => success.
+      - { type: ok, name: current_etag_accepted }
+      - { type: field_equals, name: value_now_4, path: item.v, value: 4 }

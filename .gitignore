@@ -21,3 +21,9 @@ results/
 
 # Java trust store + extracted certs (runtime, per-machine)
 build/
+
+# IDE
+.idea/
+
+# Scratch / diagrams
+mermaid-diagram.png

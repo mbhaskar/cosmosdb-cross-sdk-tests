@@ -1,0 +1,67 @@
+id: "D-401"
+phase: 11
+section: "11.01"
+title: "Transactional batch is atomic: one failing op rolls the whole batch back"
+description: |
+  Tests the SDK's transactional-batch semantics: multiple operations on a single
+  partition key commit all-or-nothing. A batch whose operations all succeed must
+  persist every item; a batch containing one failing operation (a duplicate-id
+  create => 409) must fail as a whole and persist NONE of its operations.
+
+  Flow:
+    * ``batch_ok`` creates b-1, b-2, b-3 on pk grp-1 in one batch => success.
+    * ``verify_all`` queries the partition => exactly 3 items.
+    * ``batch_rollback`` batches [create b-4, create b-1(dup)]: b-1 already exists,
+      so the batch fails atomically.
+    * ``verify_rollback`` reads b-4 => 404, proving the successful-looking first op
+      was rolled back with the failing one.
+
+  Runs on the vNext emulator (gateway :8081). Also live-safe.
+tags: [emulator, data-plane, transactional-batch, atomicity]
+backends: [emulator, live]
+runners: [python, java]
+
+fixture:
+  database: "auto"
+  container:
+    id: "docs"
+    partition_key: "/pk"
+
+steps:
+  - id: batch_ok
+    action: execute_batch
+    params:
+      partition_key: "grp-1"
+      operations:
+        - { op: create, item: { id: "b-1", pk: "grp-1", v: 1 } }
+        - { op: create, item: { id: "b-2", pk: "grp-1", v: 1 } }
+        - { op: create, item: { id: "b-3", pk: "grp-1", v: 1 } }
+    expect:
+      - { type: ok, name: batch_commits }
+
+  - id: verify_all
+    action: query_items
+    params:
+      query: "SELECT * FROM c"
+      partition_key: "grp-1"
+    expect:
+      - { type: ok, name: verify_all_ok }
+      - { type: item_count, name: three_committed, value: 3 }
+
+  - id: batch_rollback
+    action: execute_batch
+    params:
+      partition_key: "grp-1"
+      operations:
+        - { op: create, item: { id: "b-4", pk: "grp-1", v: 1 } }
+        - { op: create, item: { id: "b-1", pk: "grp-1", v: 9 } }
+    expect:
+      # SUT: duplicate b-1 => the whole batch fails (not a partial apply).
+      - { type: error, name: batch_fails_atomically }
+
+  - id: verify_rollback
+    action: read_item
+    params: { id: "b-4", partition_key: "grp-1" }
+    expect:
+      # SUT: b-4 was rolled back with the failing op -- it never persisted.
+      - { type: error_status, name: b4_rolled_back_404, value: 404 }

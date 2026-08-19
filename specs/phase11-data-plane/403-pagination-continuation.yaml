@@ -1,0 +1,69 @@
+id: "D-403"
+phase: 11
+section: "11.03"
+title: "Cross-partition pagination: continuation token is exact and resumable"
+description: |
+  Tests the SDK's paged cross-partition query path. A bounded-page drain must return
+  every row exactly once across multiple pages, and a continuation token minted after
+  the first page must resume the exact remaining set -- no overlap, no gap. This
+  exercises the SDK's paging + continuation-token machinery directly (no faults).
+
+  Flow:
+    * seed 120 items.
+    * ``full_drain`` pages the whole set at max_item_count 20: must cover all 120
+      with no duplicates and take at least 3 pages (proves real paging, not one shot).
+    * ``first_page`` drains exactly one page and exposes its continuation token.
+    * ``resume`` continues from that token: page1 ∪ resume == 120 with no overlap
+      and no gap.
+
+  Runs on the vNext emulator (gateway :8081). Also live-safe.
+tags: [emulator, data-plane, pagination, continuation-token, query-drain]
+backends: [emulator, live]
+runners: [python, java]
+
+fixture:
+  database: "auto"
+  container:
+    id: "docs"
+    partition_key: "/pk"
+
+steps:
+  - id: seed
+    action: seed_items
+    params:
+      count: 120
+      template: { id: "p-{n}", pk: "p-{n}" }
+    expect:
+      - { type: ok, name: seed_ok }
+      - { type: item_count, name: seeded_120, value: 120 }
+
+  - id: full_drain
+    action: query_drain
+    params:
+      query: "SELECT * FROM c"
+      max_item_count: 20
+    expect:
+      - { type: ok, name: full_drain_ok }
+      - { type: pages_cover_set, name: covers_120_no_dupes, expected_count: 120 }
+      - { type: page_count_gte, name: at_least_3_pages, value: 3 }
+
+  - id: first_page
+    action: query_drain
+    params:
+      query: "SELECT * FROM c"
+      max_item_count: 20
+      max_pages: 1
+    expect:
+      - { type: ok, name: first_page_ok }
+      - { type: page_count_gte, name: one_page, value: 1 }
+
+  - id: resume
+    action: query_drain
+    params:
+      query: "SELECT * FROM c"
+      max_item_count: 20
+      continuation: "${steps.first_page.continuation}"
+    expect:
+      # SUT: token resumes the exact remaining set -- no overlap, no gap.
+      - { type: ok, name: resume_ok }
+      - { type: resumes_without_gap, name: token_is_exact, first_step: first_page, expected_total: 120 }

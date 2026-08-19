@@ -2,8 +2,11 @@ package com.azure.cosmos.testrunner;
 
 import com.azure.cosmos.CosmosClient;
 import com.azure.cosmos.CosmosClientBuilder;
+import com.azure.cosmos.ConsistencyLevel;
 import com.azure.cosmos.CosmosDiagnostics;
 import com.azure.cosmos.CosmosException;
+import com.azure.cosmos.models.CosmosBatch;
+import com.azure.cosmos.models.CosmosBatchResponse;
 import com.azure.cosmos.models.CosmosContainerProperties;
 import com.azure.cosmos.models.CosmosItemRequestOptions;
 import com.azure.cosmos.models.CosmosItemResponse;
@@ -26,6 +29,7 @@ public class SdkBackend implements Backend {
     private final Boolean endpointDiscovery;
     private final Metrics metrics = new Metrics();
     private CosmosClient client;
+    private String consistencyLevel;
 
     public SdkBackend(String endpoint, String key) {
         this(endpoint, key, true, null);
@@ -57,8 +61,16 @@ public class SdkBackend implements Backend {
 
     @Override
     public OpResult createClient(String connectionMode) {
+        return createClient(connectionMode, null);
+    }
+
+    @Override
+    public OpResult createClient(String connectionMode, String consistencyLevel) {
         try {
             metrics.connectionMode = connectionMode;
+            if (consistencyLevel != null && !consistencyLevel.isEmpty()) {
+                this.consistencyLevel = consistencyLevel;
+            }
             CosmosClientBuilder builder = new CosmosClientBuilder()
                     .endpoint(endpoint)
                     .key(key);
@@ -66,6 +78,12 @@ public class SdkBackend implements Backend {
                 builder.directMode();
             } else {
                 builder.gatewayMode();
+            }
+            // Opt-in consistency level (CAP-12). Session consistency is what makes
+            // read-your-writes / monotonic-read a client-enforced contract (C-313):
+            // the SDK carries the write's session token forward onto the next read.
+            if (this.consistencyLevel != null && !this.consistencyLevel.isEmpty()) {
+                builder.consistencyLevel(parseConsistency(this.consistencyLevel));
             }
             // Pin the client to the configured endpoint when discovery is disabled
             // (single-region fault runs through the proxy). Left at the SDK default
@@ -79,6 +97,18 @@ public class SdkBackend implements Backend {
             return OpResult.ok(200);
         } catch (Exception e) {
             return sdkError(e);
+        }
+    }
+
+    private static ConsistencyLevel parseConsistency(String level) {
+        String norm = level.trim().toUpperCase().replace('-', '_').replace(' ', '_');
+        switch (norm) {
+            case "STRONG": return ConsistencyLevel.STRONG;
+            case "BOUNDED_STALENESS": return ConsistencyLevel.BOUNDED_STALENESS;
+            case "SESSION": return ConsistencyLevel.SESSION;
+            case "CONSISTENT_PREFIX": return ConsistencyLevel.CONSISTENT_PREFIX;
+            case "EVENTUAL": return ConsistencyLevel.EVENTUAL;
+            default: throw new IllegalArgumentException("unknown consistency level '" + level + "'");
         }
     }
 
@@ -114,7 +144,7 @@ public class SdkBackend implements Backend {
             CosmosItemResponse<Map> resp =
                     client.getDatabase(dbId).getContainer(containerId).createItem(item);
             return record(OpResult.ok(201, bodyOrInput((Map<String, Object>) resp.getItem(), item)),
-                    resp.getRequestCharge(), resp.getDiagnostics());
+                    resp.getRequestCharge(), resp.getDiagnostics(), resp.getResponseHeaders());
         } catch (Exception e) {
             return sdkError(e);
         }
@@ -127,21 +157,34 @@ public class SdkBackend implements Backend {
             CosmosItemResponse<Map> resp = client.getDatabase(dbId).getContainer(containerId)
                     .readItem(itemId, new PartitionKey(String.valueOf(partitionKey)), Map.class);
             return record(OpResult.ok(200, (Map<String, Object>) resp.getItem()),
-                    resp.getRequestCharge(), resp.getDiagnostics());
+                    resp.getRequestCharge(), resp.getDiagnostics(), resp.getResponseHeaders());
         } catch (Exception e) {
             return sdkError(e);
         }
     }
 
     @Override
-    @SuppressWarnings("unchecked")
     public OpResult replaceItem(String dbId, String containerId, String itemId, Object partitionKey, Map<String, Object> item) {
+        return replaceItem(dbId, containerId, itemId, partitionKey, item, null, null);
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public OpResult replaceItem(String dbId, String containerId, String itemId, Object partitionKey,
+                                Map<String, Object> item, String ifMatch, String ifNoneMatch) {
         try {
+            CosmosItemRequestOptions opts = new CosmosItemRequestOptions();
+            // Optimistic concurrency (CAP-4): a stale If-Match ETag yields 412
+            // PreconditionFailed from the service (surfaced by sdkError) -- D-400.
+            if (ifMatch != null && !"null".equals(ifMatch)) {
+                opts.setIfMatchETag(ifMatch);
+            } else if (ifNoneMatch != null && !"null".equals(ifNoneMatch)) {
+                opts.setIfNoneMatchETag(ifNoneMatch);
+            }
             CosmosItemResponse<Map> resp = client.getDatabase(dbId).getContainer(containerId)
-                    .replaceItem(item, itemId, new PartitionKey(String.valueOf(partitionKey)),
-                            new CosmosItemRequestOptions());
+                    .replaceItem(item, itemId, new PartitionKey(String.valueOf(partitionKey)), opts);
             return record(OpResult.ok(200, bodyOrInput((Map<String, Object>) resp.getItem(), item)),
-                    resp.getRequestCharge(), resp.getDiagnostics());
+                    resp.getRequestCharge(), resp.getDiagnostics(), resp.getResponseHeaders());
         } catch (Exception e) {
             return sdkError(e);
         }
@@ -154,7 +197,7 @@ public class SdkBackend implements Backend {
             CosmosItemResponse<Map> resp =
                     client.getDatabase(dbId).getContainer(containerId).upsertItem(item);
             return record(OpResult.ok(200, bodyOrInput((Map<String, Object>) resp.getItem(), item)),
-                    resp.getRequestCharge(), resp.getDiagnostics());
+                    resp.getRequestCharge(), resp.getDiagnostics(), resp.getResponseHeaders());
         } catch (Exception e) {
             return sdkError(e);
         }
@@ -203,6 +246,116 @@ public class SdkBackend implements Backend {
             OpResult r = OpResult.ok(200);
             r.items = rows;
             return record(r, totalCharge, lastDiag);
+        } catch (Exception e) {
+            return sdkError(e);
+        }
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public OpResult queryDrain(String dbId, String containerId, String query,
+                               List<Map<String, Object>> parameters, Object partitionKey, boolean crossPartition,
+                               Integer maxItemCount, Integer maxPages, String continuation) {
+        // Real paged drain (CAP-6): uses the SDK's own iterableByPage() so the
+        // continuation token is server-minted and echoed forward exactly as an
+        // application would. When `continuation` is supplied the drain RESUMES from
+        // that token (proving it survives a split mid-drain, C-311); `maxPages`
+        // stops early so a caller can capture the token after the first page (D-403).
+        try {
+            CosmosQueryRequestOptions options = new CosmosQueryRequestOptions();
+            if (partitionKey != null) {
+                options.setPartitionKey(new PartitionKey(String.valueOf(partitionKey)));
+            }
+            String finalQuery = query;
+            if (parameters != null) {
+                for (Map<String, Object> p : parameters) {
+                    finalQuery = finalQuery.replace(String.valueOf(p.get("name")),
+                            "'" + String.valueOf(p.get("value")) + "'");
+                }
+            }
+            CosmosPagedIterable<Map> it = client.getDatabase(dbId).getContainer(containerId)
+                    .queryItems(finalQuery, options, Map.class);
+            int pageSize = (maxItemCount != null && maxItemCount > 0) ? maxItemCount : 100;
+            boolean hasCont = continuation != null && !continuation.isEmpty() && !"null".equals(continuation);
+            Iterable<com.azure.cosmos.models.FeedResponse<Map>> pages =
+                    hasCont ? it.iterableByPage(continuation, pageSize) : it.iterableByPage(pageSize);
+            List<Object> rows = new ArrayList<>();
+            int pages_seen = 0;
+            String lastToken = null;
+            CosmosDiagnostics lastDiag = null;
+            double totalCharge = 0.0;
+            for (com.azure.cosmos.models.FeedResponse<Map> page : pages) {
+                rows.addAll(page.getResults());
+                lastToken = page.getContinuationToken();
+                lastDiag = page.getCosmosDiagnostics();
+                totalCharge += page.getRequestCharge();
+                pages_seen++;
+                if (maxPages != null && pages_seen >= maxPages) {
+                    break;
+                }
+            }
+            OpResult r = OpResult.ok(200);
+            r.items = rows;
+            r.continuation = lastToken;
+            r.pageCount = pages_seen;
+            return record(r, totalCharge, lastDiag);
+        } catch (Exception e) {
+            return sdkError(e);
+        }
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public OpResult executeBatch(String dbId, String containerId,
+                                 List<Map<String, Object>> operations, Object partitionKey) {
+        // Transactional batch (CAP-2): all-or-nothing on one partition key. On a
+        // failing sub-operation the Java SDK returns a non-success batch response
+        // (no throw) and rolls back every op -- D-401 then reads a would-be-created
+        // item back and asserts 404 to prove atomicity.
+        try {
+            CosmosBatch batch = CosmosBatch.createCosmosBatch(new PartitionKey(String.valueOf(partitionKey)));
+            for (Map<String, Object> op : (operations == null ? new ArrayList<Map<String, Object>>() : operations)) {
+                String kind = String.valueOf(op.get("op"));
+                switch (kind) {
+                    case "create":
+                        batch.createItemOperation(op.get("item"));
+                        break;
+                    case "upsert":
+                        batch.upsertItemOperation(op.get("item"));
+                        break;
+                    case "replace":
+                        batch.replaceItemOperation(String.valueOf(op.get("id")), op.get("item"));
+                        break;
+                    case "read":
+                        batch.readItemOperation(String.valueOf(op.get("id")));
+                        break;
+                    case "delete":
+                        batch.deleteItemOperation(String.valueOf(op.get("id")));
+                        break;
+                    default:
+                        return OpResult.fail(0, "UnknownBatchOp", "unknown batch op '" + kind + "'");
+                }
+            }
+            CosmosBatchResponse resp = client.getDatabase(dbId).getContainer(containerId)
+                    .executeCosmosBatch(batch);
+            if (!resp.isSuccessStatusCode()) {
+                return record(OpResult.fail(resp.getStatusCode(), "Cosmos" + resp.getStatusCode(),
+                        "transactional batch failed and rolled back"), resp.getRequestCharge(), resp.getDiagnostics());
+            }
+            List<Object> rows = new ArrayList<>();
+            for (com.azure.cosmos.models.CosmosBatchOperationResult br : resp.getResults()) {
+                try {
+                    Map<String, Object> m = br.getItem(Map.class);
+                    if (m != null) {
+                        rows.add(m);
+                    }
+                } catch (Exception ignored) {
+                    // read/delete ops may carry no body -- skip.
+                }
+            }
+            OpResult r = OpResult.ok(200);
+            r.items = rows;
+            return record(r, resp.getRequestCharge(), resp.getDiagnostics());
         } catch (Exception e) {
             return sdkError(e);
         }
@@ -306,6 +459,23 @@ public class SdkBackend implements Backend {
             String text = d.toString();
             r.diagnostics = text;
             metrics.retries += parseRetries(text);
+        }
+        return r;
+    }
+
+    /** Same, plus the response headers (lower-cased) for diagnostic_present (CAP-12). */
+    private OpResult record(OpResult r, double requestCharge, CosmosDiagnostics d, Map<String, String> headers) {
+        record(r, requestCharge, d);
+        if (headers != null) {
+            Map<String, Object> lc = new java.util.LinkedHashMap<>();
+            for (Map.Entry<String, String> e : headers.entrySet()) {
+                lc.put(String.valueOf(e.getKey()).toLowerCase(), e.getValue());
+            }
+            Map<String, String> lcStr = new java.util.LinkedHashMap<>();
+            for (Map.Entry<String, Object> e : lc.entrySet()) {
+                lcStr.put(e.getKey(), e.getValue() == null ? null : String.valueOf(e.getValue()));
+            }
+            r.diagnosticHeaders = lcStr;
         }
         return r;
     }

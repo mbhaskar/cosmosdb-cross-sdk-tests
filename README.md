@@ -6,7 +6,9 @@ multiple CosmosDB SDKs** (Python + Java) and shows the results in a matrix
 dashboard, with a cross-SDK comparison report.
 
 > Full test-scenario catalog: [`plan.md`](./plan.md) (280 scenarios across 16
-> phases). This MVP ships 10 of them end-to-end.
+> phases). This repo ships **29 scenarios across 8 phases** end-to-end,
+> including real SDK control-plane and data-plane scenarios that run against the
+> in-memory emulator and the Linux emulator.
 
 ---
 
@@ -14,17 +16,19 @@ dashboard, with a cross-SDK comparison report.
 
 | Piece | Status | Notes |
 |-------|--------|-------|
-| YAML scenario spec format | ✅ | [`specs/schema.yaml`](./specs/schema.yaml) + 10 scenarios |
+| YAML scenario spec format | ✅ | [`specs/schema.yaml`](./specs/schema.yaml) + 29 scenarios across 8 phases |
 | Python runner | ✅ | mock + real `azure-cosmos` backend |
 | Java runner | ✅ | mock + real `azure-cosmos` backend (shaded jar) |
 | Orchestrator API (FastAPI) | ✅ | load specs, dispatch runners, SQLite store |
 | Dashboard | ✅ | single-file HTML matrix, run buttons, live polling, drill-down |
 | Cross-SDK compare report | ✅ | [`scripts/compare.py`](./scripts/compare.py) |
-| Backends | ✅ | `mock` (default, no infra), `emulator`, `live` |
+| Backends | ✅ | `mock` (default, no infra), `inmemory` (in-memory emulator via gateway shim), `emulator` (Linux emulator), `live` |
+| Fault injection | ✅ | Toxiproxy-based fault stack ([`scripts/run-fault-stack.sh`](./scripts/run-fault-stack.sh) + `specs/phase06-fault-injection/`) |
+| SDK-from-source | ✅ | run against a locally-built SDK branch (`--source local`, [`sdk-from-source.yml`](./.github/workflows/sdk-from-source.yml)) |
 
 ### Deliberately deferred (post-MVP)
-Fault injection (Toxiproxy/proxy), WebSocket streaming, SDK version
-download/management, history charts, .NET runner, full 280-scenario coverage.
+WebSocket streaming, SDK version download/management, history charts, .NET
+runner, full 280-scenario coverage.
 
 ---
 
@@ -77,7 +81,7 @@ on other backends.
 
 ---
 
-## Configuring live / emulator backends
+## Configuring inmemory / emulator / live backends
 
 The `mock` backend needs no configuration. For `emulator` or `live`, the
 orchestrator resolves an **endpoint** and **key** using this precedence
@@ -106,6 +110,26 @@ If no endpoint/key can be resolved for a non-mock backend, the API returns a
 `400` with a message naming all three options. **Keys are never stored in
 plaintext**: the copy persisted to `results.db` (and returned by
 `GET /api/runs/<id>`) has the key replaced with `***redacted***`.
+
+### The `inmemory` backend
+
+The `inmemory` tier runs the SDKs against an **in-memory Cosmos emulator**
+fronted by a small name-only gateway shim ([`emulator/inmemory/cosmos_gateway_proxy.py`](./emulator/inmemory/cosmos_gateway_proxy.py)),
+so control-plane / data-plane scenarios exercise the real SDK routing paths with
+no live account. It needs **Docker** and (for the Java runner) a JVM trust store.
+
+```bash
+scripts/run-inmemory-emulator.sh up      # build + start the emulator + gateway,
+                                          # and (re)build the Java trust store
+scripts/run-inmemory-emulator.sh status  # health
+scripts/run-inmemory-emulator.sh down    # stop
+```
+
+The `inmemory` block in [`config/default.yaml`](./config/default.yaml) already
+points at the local gateway (`https://localhost:49151`) with the well-known
+emulator key, so it "just works" once the container is up. Every `up` recreates
+the container (data is wiped) and regenerates the trust store, so re-import is
+automatic. Scenarios tagged `backends: [inmemory]` run only on this tier.
 
 ### Metrics fidelity (what's real vs. assumed)
 
@@ -158,7 +182,7 @@ Orchestrator API (FastAPI)  ──reads──►  specs/*.yaml
         ├──────────────► Python runner (cosmos_test_runner)
         └──────────────► Java runner   (cosmos-test-runner.jar)
                                  │
-                          mock | emulator | live
+                          mock | inmemory | emulator | live
 ```
 
 The **runner JSON contract** is the keystone: adding an SDK = a new runner that

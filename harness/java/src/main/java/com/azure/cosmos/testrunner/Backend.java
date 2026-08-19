@@ -9,6 +9,15 @@ public interface Backend {
 
     OpResult createClient(String connectionMode);
 
+    /**
+     * Create the client with an explicit consistency level (CAP-12, e.g. Session
+     * for read-your-writes in C-313). Default ignores consistency and delegates to
+     * the single-arg form; the real SDK backend overrides this.
+     */
+    default OpResult createClient(String connectionMode, String consistencyLevel) {
+        return createClient(connectionMode);
+    }
+
     OpResult createDatabase(String dbId, boolean createIfNotExists);
 
     OpResult createContainer(String dbId, String containerId, String partitionKey, boolean createIfNotExists);
@@ -19,12 +28,49 @@ public interface Backend {
 
     OpResult replaceItem(String dbId, String containerId, String itemId, Object partitionKey, Map<String, Object> item);
 
+    /**
+     * Replace with optimistic-concurrency preconditions (CAP-4). When {@code ifMatch}
+     * is set the SDK sends If-Match; a stale ETag yields 412 (D-400). Default drops
+     * the preconditions and delegates; the real SDK backend overrides this.
+     */
+    default OpResult replaceItem(String dbId, String containerId, String itemId, Object partitionKey,
+                                 Map<String, Object> item, String ifMatch, String ifNoneMatch) {
+        return replaceItem(dbId, containerId, itemId, partitionKey, item);
+    }
+
     OpResult upsertItem(String dbId, String containerId, Map<String, Object> item);
 
     OpResult deleteItem(String dbId, String containerId, String itemId, Object partitionKey);
 
     OpResult queryItems(String dbId, String containerId, String query,
                         List<Map<String, Object>> parameters, Object partitionKey, boolean crossPartition);
+
+    /**
+     * Real paged drain (CAP-6). Follows server-minted continuation tokens page by
+     * page. {@code maxItemCount} sets the page size, {@code maxPages} stops early
+     * (exposing {@link OpResult#continuation} for a later resume), and
+     * {@code continuation} resumes from a previously captured token -- proving the
+     * token survives a topology change (C-311) or is exact across pages (D-403).
+     * Default delegates to {@link #queryItems} (single fetch) so non-SDK backends
+     * still function; the real SDK backend overrides this.
+     */
+    default OpResult queryDrain(String dbId, String containerId, String query,
+                                List<Map<String, Object>> parameters, Object partitionKey, boolean crossPartition,
+                                Integer maxItemCount, Integer maxPages, String continuation) {
+        OpResult r = queryItems(dbId, containerId, query, parameters, partitionKey, crossPartition);
+        r.pageCount = 1;
+        return r;
+    }
+
+    /**
+     * Transactional batch (CAP-2): all-or-nothing on one partition key. A failing
+     * sub-operation fails the whole batch and rolls back every operation (D-401).
+     * Default is unsupported; the real SDK backend overrides this.
+     */
+    default OpResult executeBatch(String dbId, String containerId,
+                                  List<Map<String, Object>> operations, Object partitionKey) {
+        return OpResult.fail(0, "NotImplemented", "execute_batch not supported by this backend");
+    }
 
     OpResult deleteDatabase(String dbId);
 

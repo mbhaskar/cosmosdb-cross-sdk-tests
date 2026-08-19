@@ -42,6 +42,11 @@ class OpResult:
     # on throttle). metadata_events lists metadata calls made during the op.
     status_sequence: List[int] = field(default_factory=list)
     metadata_events: List[str] = field(default_factory=list)
+    # Pagination fidelity (CAP-6): the continuation token exposed after a paged
+    # drain (None when the set was exhausted), and how many real pages the SDK
+    # fetched. Used by continuation-token round-trip scenarios (D-403, C-311).
+    continuation: Optional[str] = None
+    page_count: int = 0
 
 
 @dataclass
@@ -98,6 +103,20 @@ class Backend:
         raise NotImplementedError
 
     def query_items(self, db_id: str, container_id: str, query: str, parameters=None, partition_key=None, cross_partition=False, **kwargs) -> OpResult:
+        raise NotImplementedError
+
+    def query_drain(self, db_id: str, container_id: str, query: str, parameters=None,
+                    partition_key=None, cross_partition=True, max_item_count=None,
+                    max_pages=None, continuation=None, **kwargs) -> OpResult:
+        """Drain a (paginated) query, optionally starting from ``continuation`` and
+        stopping after ``max_pages``. The default implementation ignores real
+        paging and delegates to :meth:`query_items`; the SDK backend overrides it
+        to follow continuation tokens page-by-page (CAP-6)."""
+        return self.query_items(db_id, container_id, query, parameters, partition_key, cross_partition)
+
+    def execute_batch(self, db_id: str, container_id: str, operations, partition_key, **kwargs) -> OpResult:
+        """Execute a transactional batch (all-or-nothing) on a single partition
+        key (CAP-2). ``operations`` is a list of ``{op, ...}`` dicts."""
         raise NotImplementedError
 
     def read_feed_ranges(self, db_id: str, container_id: str, **kwargs) -> OpResult:
@@ -572,7 +591,8 @@ class SdkBackend(Backend):
     """Drives the real azure-cosmos SDK (emulator or live account)."""
 
     def __init__(self, endpoint: str, key: str, verify_tls: bool = True,
-                 endpoint_discovery: Optional[bool] = None) -> None:
+                 endpoint_discovery: Optional[bool] = None,
+                 consistency_level: Optional[str] = None) -> None:
         self.endpoint = endpoint
         self.key = key
         self.verify_tls = verify_tls
@@ -586,6 +606,7 @@ class SdkBackend(Backend):
         self.metrics = Metrics()
         self._client = None
         self._connection_mode = "gateway"
+        self._consistency_level = consistency_level
         self._last_diag: Optional[Dict[str, Any]] = None
 
     def _capture(self, *args) -> None:
@@ -631,6 +652,13 @@ class SdkBackend(Backend):
             client_kwargs = {}
             if not self.verify_tls:
                 client_kwargs["connection_verify"] = False
+            # Opt-in consistency level (CAP-12). Session consistency is what makes
+            # read-your-writes deterministic on a single client, so C-313 sets it
+            # here; left at the account default otherwise.
+            consistency = kwargs.get("consistency_level") or self._consistency_level
+            if consistency:
+                client_kwargs["consistency_level"] = consistency
+                self._consistency_level = consistency
             # Wrap the default transport so injected transport faults / throttles
             # surface as a real retry count (see _CountingTransport).
             client_kwargs["transport"] = _CountingTransport(RequestsTransport(), self.metrics)
@@ -698,8 +726,20 @@ class SdkBackend(Backend):
     def replace_item(self, db_id, container_id, item_id, partition_key, item, **kwargs) -> OpResult:
         try:
             self._last_diag = None
+            opts: Dict[str, Any] = {}
+            # Optimistic concurrency (CAP-4): If-Match / If-None-Match preconditions.
+            # A stale ETag under If-Match yields 412 PreconditionFailed from the
+            # service (surfaced by _sdk_error), which is exactly what D-400 asserts.
+            if kwargs.get("if_match") is not None:
+                from azure.core import MatchConditions
+                opts["etag"] = kwargs["if_match"]
+                opts["match_condition"] = MatchConditions.IfNotModified
+            elif kwargs.get("if_none_match") is not None:
+                from azure.core import MatchConditions
+                opts["etag"] = kwargs["if_none_match"]
+                opts["match_condition"] = MatchConditions.IfModified
             replaced = self._container(db_id, container_id).replace_item(
-                item=item_id, body=dict(item), response_hook=self._capture)
+                item=item_id, body=dict(item), response_hook=self._capture, **opts)
             return OpResult(ok=True, status_code=200, item=dict(replaced), diagnostics=self._last_diag)
         except Exception as exc:  # noqa: BLE001
             return _sdk_error(exc, self.metrics)
@@ -736,11 +776,64 @@ class SdkBackend(Backend):
         except Exception as exc:  # noqa: BLE001
             return _sdk_error(exc, self.metrics)
 
-    def delete_database(self, db_id, **kwargs) -> OpResult:
+    def query_drain(self, db_id, container_id, query, parameters=None, partition_key=None,
+                    cross_partition=True, max_item_count=None, max_pages=None,
+                    continuation=None, **kwargs) -> OpResult:
+        # Real paged drain (CAP-6). Uses the SDK's own by_page() pager so the
+        # continuation token is server-minted and echoed forward exactly as an
+        # application would do it. When `continuation` is supplied the drain
+        # RESUMES from that token (proving the token is honored across topology
+        # changes, e.g. a split mid-drain in C-311); `max_pages` stops early so a
+        # caller can capture the continuation after the first page (D-403).
         try:
             self._last_diag = None
-            self._client.delete_database(db_id, response_hook=self._capture)
-            return OpResult(ok=True, status_code=204, diagnostics=self._last_diag)
+            kw = {"query": query, "parameters": parameters or [], "response_hook": self._capture}
+            if partition_key is not None:
+                kw["partition_key"] = partition_key
+            else:
+                kw["enable_cross_partition_query"] = cross_partition
+            if max_item_count is not None:
+                kw["max_item_count"] = int(max_item_count)
+            iterable = self._container(db_id, container_id).query_items(**kw)
+            pager = iterable.by_page(continuation) if continuation else iterable.by_page()
+            items: List[Dict[str, Any]] = []
+            pages = 0
+            last_token = None
+            for page in pager:
+                items.extend(dict(i) for i in page)
+                pages += 1
+                last_token = getattr(pager, "continuation_token", None)
+                if max_pages is not None and pages >= int(max_pages):
+                    break
+            return OpResult(ok=True, status_code=200, items=items, continuation=last_token,
+                            page_count=pages, diagnostics=self._last_diag)
+        except Exception as exc:  # noqa: BLE001
+            return _sdk_error(exc, self.metrics)
+
+    def execute_batch(self, db_id, container_id, operations, partition_key, **kwargs) -> OpResult:
+        # Transactional batch (CAP-2): all-or-nothing on one partition key. A
+        # failing sub-operation raises CosmosBatchOperationError (mapped to its
+        # status by _sdk_error) and the whole batch rolls back -- D-401 then reads
+        # a would-be-created item back and asserts 404 to prove atomicity.
+        try:
+            self._last_diag = None
+            batch = []
+            for op in operations or []:
+                kind = op.get("op")
+                if kind in ("create", "upsert"):
+                    batch.append((kind, (dict(op["item"]),)))
+                elif kind == "replace":
+                    batch.append(("replace", (str(op["id"]), dict(op["item"]))))
+                elif kind == "read":
+                    batch.append(("read", (str(op["id"]),)))
+                elif kind == "delete":
+                    batch.append(("delete", (str(op["id"]),)))
+                else:
+                    return OpResult(ok=False, status_code=0, error=f"unknown batch op '{kind}'")
+            results = self._container(db_id, container_id).execute_item_batch(
+                batch_operations=batch, partition_key=partition_key, response_hook=self._capture)
+            items = [dict(r) for r in results] if results else []
+            return OpResult(ok=True, status_code=200, items=items, diagnostics=self._last_diag)
         except Exception as exc:  # noqa: BLE001
             return _sdk_error(exc, self.metrics)
 
@@ -860,5 +953,7 @@ def make_backend(config: Dict[str, Any]) -> Backend:
     # single-region transport-fault runs so the client stays on the proxy
     # endpoint instead of the emulator's self-advertised address.
     endpoint_discovery = config.get("enable_endpoint_discovery")
+    consistency_level = config.get("consistency_level") or config.get("consistency")
     return SdkBackend(endpoint, key, verify_tls=bool(tls_verify),
-                      endpoint_discovery=endpoint_discovery)
+                      endpoint_discovery=endpoint_discovery,
+                      consistency_level=consistency_level)

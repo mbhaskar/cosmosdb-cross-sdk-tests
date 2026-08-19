@@ -85,10 +85,11 @@ fi
 TMP_PEM="$(mktemp)"
 trap 'rm -f "$TMP_PEM"' EXIT
 scrape_leaf() {
-  : >"$TMP_PEM"
-  openssl s_client -connect "${EMULATOR_HOST}:${EMULATOR_PORT}" -servername "${EMULATOR_HOST}" \
-    </dev/null 2>/dev/null | openssl x509 >"$TMP_PEM" 2>/dev/null
-  [[ -s "$TMP_PEM" ]]
+  local host="${1:-$EMULATOR_HOST}" port="${2:-$EMULATOR_PORT}" out="${3:-$TMP_PEM}"
+  : >"$out"
+  openssl s_client -connect "${host}:${port}" -servername "${host}" \
+    </dev/null 2>/dev/null | openssl x509 >"$out" 2>/dev/null
+  [[ -s "$out" ]]
 }
 leaf_ok=""
 for _ in $(seq 1 10); do
@@ -101,6 +102,25 @@ else
   echo "warn: could not fetch emulator cert from ${EMULATOR_HOST}:${EMULATOR_PORT} after 10 tries" >&2
   echo "      (is the gateway serving TLS there? try: openssl s_client -connect ${EMULATOR_HOST}:${EMULATOR_PORT})" >&2
 fi
+
+# 3) Extra emulator endpoints (best-effort). The vNext Cosmos emulator (default
+# :8081) used by the `emulator` backend tier presents a DIFFERENT self-signed
+# leaf than the inmemory gateway (:49151). When both tiers are exercised from the
+# same Java runner they must both be trusted, so import each reachable extra
+# endpoint under its own alias. Unreachable endpoints are silently skipped so a
+# single-tier setup still succeeds. Override the list via EMULATOR_EXTRA_ENDPOINTS
+# ("host:port host:port ..."); set it empty to disable.
+EMULATOR_EXTRA_ENDPOINTS="${EMULATOR_EXTRA_ENDPOINTS:-localhost:8081}"
+for endpoint in $EMULATOR_EXTRA_ENDPOINTS; do
+  ehost="${endpoint%%:*}"; eport="${endpoint##*:}"
+  # Skip if it duplicates the primary endpoint we already imported.
+  [[ "$ehost:$eport" == "$EMULATOR_HOST:$EMULATOR_PORT" ]] && continue
+  EXTRA_PEM="$(mktemp)"
+  if scrape_leaf "$ehost" "$eport" "$EXTRA_PEM"; then
+    import_cert "cosmos-emulator-${eport}" "$EXTRA_PEM"
+  fi
+  rm -f "$EXTRA_PEM"
+done
 
 echo
 echo "trust store written: $OUT_JKS"

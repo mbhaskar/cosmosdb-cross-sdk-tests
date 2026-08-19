@@ -1,0 +1,71 @@
+id: "C-311"
+phase: 10
+section: "10.11"
+title: "Split mid query-drain: SDK resumes from its continuation with no data loss"
+description: |
+  Tests continuation-token durability across a REAL topology change -- a pure SDK
+  behavior. The scenario drains one page of a cross-partition query, captures the
+  server-minted continuation token, then splits a partition at the engine while the
+  drain is "paused." Resuming from the captured token must return every remaining
+  row exactly once: no overlap with page 1 (token didn't rewind) and no gap (token
+  didn't skip the rows that moved to a new child range).
+
+  Flow:
+    * seed 120 items across the 4 real partitions.
+    * ``first_page`` drains exactly one page (max_pages: 1) and exposes its
+      continuation token.
+    * timeline ``split_partition {partition_id: 0}`` splits a partition at the
+      engine, invalidating the routing for the rows the token still has to serve.
+    * ``resume`` continues the drain from ``first_page``'s token. The SDK must hit
+      the gone range, refresh routing, and stream the rest. ``resumes_without_gap``
+      asserts page1 ∪ resume == the full 120 with zero overlap and zero gap.
+
+  If the SDK loses rows or re-serves page 1 after the split, the assertion fails --
+  which is the real defect this scenario exists to catch. Requires the in-memory
+  emulator (management :49150 / gateway :49151).
+tags: [inmemory, control-plane, split, continuation-token, query-drain, sdk-reaction]
+backends: [inmemory]
+runners: [python, java]
+
+fixture:
+  database: "auto"
+  container:
+    id: "orders"
+    partition_key: "/customerId"
+
+timeline:
+  - after: first_page
+    event: split_partition
+    args: { partition_id: 0, wait: true }
+
+steps:
+  - id: seed
+    action: seed_items
+    params:
+      count: 120
+      template: { id: "o-{n}", customerId: "c-{n}" }
+    expect:
+      - { type: ok, name: seed_ok }
+      - { type: item_count, name: seeded_120, value: 120 }
+
+  - id: first_page
+    action: query_drain
+    params:
+      query: "SELECT * FROM c"
+      max_item_count: 20
+      max_pages: 1
+    expect:
+      - { type: ok, name: first_page_ok }
+      - { type: page_count_gte, name: one_page, value: 1 }
+
+  - id: resume
+    action: query_drain
+    params:
+      query: "SELECT * FROM c"
+      max_item_count: 20
+      continuation: "${steps.first_page.continuation}"
+    expect:
+      # SUT: resuming from the pre-split token yields all remaining rows exactly
+      # once -- proving the SDK survived the split mid-drain with no data loss.
+      - { type: ok, name: resume_ok }
+      - { type: resumes_without_gap, name: no_loss_no_dupes, first_step: first_page, expected_total: 120 }

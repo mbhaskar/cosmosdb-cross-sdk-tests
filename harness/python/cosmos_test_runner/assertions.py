@@ -166,6 +166,39 @@ def _evaluate_one(exp: Dict[str, Any], result: OpResult, backend: Backend,
         covers = expected is None or len(unique) == expected
         return outcome(no_dupes and covers,
                        f"n={len(ids)} unique={len(unique)} expected={expected} no_dupes={no_dupes}")
+    if t == "page_count_gte":
+        # Proves real pagination happened (the SDK fetched multiple pages rather
+        # than one big fetch) -- guards D-403 against a trivially-passing drain.
+        actual = int(getattr(result, "page_count", 0) or 0)
+        return outcome(actual >= exp["value"], f"pages={actual}")
+    if t == "resumes_without_gap":
+        # Continuation-token fidelity (CAP-6): the current (resumed) drain's items,
+        # unioned with a referenced earlier step's items, must exactly cover the
+        # expected set with NO overlap (token didn't re-serve page 1) and NO gap
+        # (token didn't skip rows) -- e.g. resuming across a split in C-311.
+        first_step = exp.get("first_step")
+        steps = context.get("steps") or {}
+        first = steps.get(first_step) or {}
+        first_ids = [str((r or {}).get("id")) for r in (first.get("items") or []) if isinstance(r, dict)]
+        rest_ids = [str((r or {}).get("id")) for r in (result.items or []) if isinstance(r, dict)]
+        overlap = set(first_ids) & set(rest_ids)
+        union = set(first_ids) | set(rest_ids)
+        total_ids = first_ids + rest_ids
+        no_dupes = len(total_ids) == len(union)
+        expected = exp.get("expected_total")
+        covers = expected is None or len(union) == expected
+        passed = (not overlap) and no_dupes and covers
+        return outcome(passed,
+                       f"first={len(first_ids)} resumed={len(rest_ids)} union={len(union)} "
+                       f"expected={expected} overlap={len(overlap)} no_dupes={no_dupes}")
+    if t == "diagnostic_present":
+        # A named response header (e.g. x-ms-session-token) was surfaced in SDK
+        # diagnostics for this op -- evidence the SDK exercised that protocol path.
+        key = str(exp.get("key", "")).lower()
+        diag = result.diagnostics or {}
+        headers = {str(k).lower(): v for k, v in (diag.get("all_headers") or diag).items()}
+        present = key in headers and str(headers.get(key)) not in ("", "None")
+        return outcome(present, f"key={key!r} present={present}")
 
     return outcome(False, f"unknown assertion type '{t}'")
 

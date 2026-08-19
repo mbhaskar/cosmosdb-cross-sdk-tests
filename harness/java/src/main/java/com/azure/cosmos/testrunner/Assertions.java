@@ -121,6 +121,57 @@ public final class Assertions {
                         "n=" + ids.size() + " unique=" + unique.size() + " expected=" + expected
                                 + " no_dupes=" + noDupes);
             }
+            case "page_count_gte": {
+                // Proves real pagination happened (multiple pages, not one fetch) --
+                // guards D-403 against a trivially-passing drain (mirrors Python).
+                int actual = result.pageCount;
+                return outcome(name, actual >= asInt(exp.get("value")), "pages=" + actual);
+            }
+            case "resumes_without_gap": {
+                // Continuation-token fidelity (CAP-6): the resumed drain's items,
+                // unioned with an earlier step's items, must exactly cover the
+                // expected set with NO overlap (token didn't rewind) and NO gap
+                // (token didn't skip rows) -- e.g. resuming across a split (C-311).
+                String firstStep = String.valueOf(exp.get("first_step"));
+                List<String> firstIds = stepItemIds(context, firstStep);
+                List<String> restIds = new ArrayList<>();
+                if (result.items != null) {
+                    for (Object r : result.items) {
+                        if (r instanceof Map) {
+                            restIds.add(String.valueOf(((Map<String, Object>) r).get("id")));
+                        }
+                    }
+                }
+                java.util.Set<String> firstSet = new java.util.HashSet<>(firstIds);
+                java.util.Set<String> restSet = new java.util.HashSet<>(restIds);
+                java.util.Set<String> overlap = new java.util.HashSet<>(firstSet);
+                overlap.retainAll(restSet);
+                java.util.Set<String> union = new java.util.HashSet<>(firstSet);
+                union.addAll(restSet);
+                boolean noDupes = (firstIds.size() + restIds.size()) == union.size();
+                Object expected = exp.get("expected_total");
+                boolean covers = expected == null || union.size() == asInt(expected);
+                boolean passed = overlap.isEmpty() && noDupes && covers;
+                return outcome(name, passed,
+                        "first=" + firstIds.size() + " resumed=" + restIds.size() + " union=" + union.size()
+                                + " expected=" + expected + " overlap=" + overlap.size() + " no_dupes=" + noDupes);
+            }
+            case "diagnostic_present": {
+                // A named response header (e.g. x-ms-session-token) was surfaced for
+                // this op -- evidence the SDK exercised that protocol path (C-313).
+                String keyLc = String.valueOf(exp.getOrDefault("key", "")).toLowerCase();
+                boolean present = false;
+                if (result.diagnosticHeaders != null && result.diagnosticHeaders.containsKey(keyLc)) {
+                    String v = result.diagnosticHeaders.get(keyLc);
+                    present = v != null && !v.isEmpty() && !"null".equals(v);
+                }
+                // Fallback: some SDK builds surface the token only in the diagnostics
+                // blob rather than the header map.
+                if (!present && result.diagnostics != null) {
+                    present = result.diagnostics.toLowerCase().contains(keyLc);
+                }
+                return outcome(name, present, "key='" + keyLc + "' present=" + present);
+            }
 
             default:
                 return outcome(name, false, "unknown assertion type '" + type + "'");
@@ -191,6 +242,25 @@ public final class Assertions {
     private static int asInt(Object v) {
         if (v instanceof Number) return ((Number) v).intValue();
         return Integer.parseInt(String.valueOf(v));
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<String> stepItemIds(Map<String, Object> context, String stepId) {
+        List<String> ids = new ArrayList<>();
+        if (context == null) return ids;
+        Object stepsObj = context.get("steps");
+        if (!(stepsObj instanceof Map)) return ids;
+        Object step = ((Map<String, Object>) stepsObj).get(stepId);
+        if (!(step instanceof Map)) return ids;
+        Object items = ((Map<String, Object>) step).get("items");
+        if (items instanceof List) {
+            for (Object r : (List<Object>) items) {
+                if (r instanceof Map) {
+                    ids.add(String.valueOf(((Map<String, Object>) r).get("id")));
+                }
+            }
+        }
+        return ids;
     }
 
     private static Map<String, Object> outcome(String name, boolean passed, String detail) {

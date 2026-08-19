@@ -48,7 +48,7 @@ if [ -n "${CONTAINER_IP}" ]; then
   for port in ${GATEWAY_PORTS}; do
     echo "[entrypoint] gateway normalizer (TLS) ${CONTAINER_IP}:${port} -> 127.0.0.1:${port}" >&2
     PROXY_LISTEN_HOST="${CONTAINER_IP}" PROXY_LISTEN_PORT="${port}" PROXY_UPSTREAM_PORT="${port}" \
-      PROXY_TLS_CERT="${TLS_CERT}" PROXY_TLS_KEY="${TLS_KEY}" \
+      PROXY_TLS_CERT="${TLS_CERT}" PROXY_TLS_KEY="${TLS_KEY}" PROXY_DEBUG="${PROXY_DEBUG:-}" \
       python3 /usr/local/bin/cosmos_gateway_proxy.py &
   done
 else

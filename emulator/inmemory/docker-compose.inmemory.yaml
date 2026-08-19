@@ -23,6 +23,8 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: cosmos-inmemory-emulator
+    environment:
+      - PROXY_DEBUG=${PROXY_DEBUG:-}
     ports:
       - "49150:49150"   # management REST API (control-plane)
       - "49151:49151"   # Gateway V1 (East US) data-plane, JSON REST over TLS (https)

@@ -205,6 +205,9 @@ class ScenarioRunner:
                 "item": result.item or {},
                 "items": result.items or [],
                 "id": (result.item or {}).get("id"),
+                "continuation": result.continuation,
+                "page_count": result.page_count,
+                "diagnostics": result.diagnostics or {},
             }
         outcome = "ok" if result.ok else f"FAILED({result.status_code} {result.error_code})"
         self._log(f"step '{step.get('id', action)}' action={action} -> {outcome}")
@@ -229,7 +232,8 @@ class ScenarioRunner:
         return result
 
     def _evaluate(self, step: Dict[str, Any], result: OpResult, scope: str = None) -> None:
-        ctx = {"latency": self.latency_samples, "resource": self.resource_samples, "scope": scope}
+        ctx = {"latency": self.latency_samples, "resource": self.resource_samples,
+               "scope": scope, "steps": self.ctx["steps"]}
         for outc in assertions.evaluate(step.get("expect", []), result, self.backend,
                                         self.metric_snapshots, ctx):
             outc["step"] = step.get("id", step.get("action"))

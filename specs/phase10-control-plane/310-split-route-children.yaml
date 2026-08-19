@@ -1,0 +1,103 @@
+id: "C-310"
+phase: 10
+section: "10.10"
+title: "Real split: SDK refreshes routing and routes reads/writes to the new children"
+description: |
+  Closes the C-301 gap. C-301 only read the engine's raw /pkranges (an oracle) to
+  confirm a split happened on the wire (4 -> 5); it asserted NOTHING about the SDK.
+  This scenario drives the same REAL split but every post-split assertion targets an
+  SDK operation, so it tests the SDK -- not the emulator.
+
+  Flow:
+    * seed 40 items across the 4 real partitions (SDK writes).
+    * ``warm`` runs a cross-partition drain so the SDK builds its routing map over
+      the 4-range topology.
+    * timeline ``split_partition {partition_id: 0}`` splits parent 0 into two
+      children at the engine (real management REST; long-running op polled to
+      Succeeded).
+    * SDK assertions AFTER the split:
+        - ``read_after_split`` re-drains cross-partition: the SDK must hit the gone
+          parent range, refresh its routing cache (410/PartitionKeyRangeGone), fan
+          out to the 5 children, and return all 40 items with no duplicates.
+        - ``point_read`` reads a single key that now lives in a child range: the
+          SDK must route the point read to the correct child.
+        - ``write_after_split`` upserts that key: the write must route to the child.
+    * ``read_pkranges`` before/after remain only as the ground-truth ORACLE that the
+      split actually occurred (4 -> 5), never as the thing under test.
+
+  Requires the in-memory emulator (management :49150 / gateway :49151);
+  ``scripts/run-inmemory-emulator.sh up``. Auto-namespaced fixture keeps counts
+  deterministic across re-runs.
+tags: [inmemory, control-plane, split, routing-cache, feedrange, sdk-reaction]
+backends: [inmemory]
+runners: [python, java]
+
+fixture:
+  database: "auto"
+  container:
+    id: "orders"
+    partition_key: "/customerId"
+
+timeline:
+  - after: warm
+    event: split_partition
+    args: { partition_id: 0, wait: true }
+
+steps:
+  - id: seed
+    action: seed_items
+    params:
+      count: 40
+      template: { id: "cust-{n}", customerId: "cust-{n}", v: "1" }
+    expect:
+      - { type: ok, name: seed_ok }
+      - { type: item_count, name: seeded_40, value: 40 }
+
+  - id: ranges_before
+    action: read_pkranges
+    expect:
+      - { type: ok, name: oracle_read_ok }
+      - { type: item_count, name: four_ranges_before, value: 4 }
+
+  - id: warm
+    action: query_drain
+    params:
+      query: "SELECT * FROM c"
+      max_item_count: 20
+    expect:
+      - { type: ok, name: warm_ok }
+      - { type: pages_cover_set, name: warm_sees_40, expected_count: 40 }
+
+  - id: ranges_after
+    action: read_pkranges
+    expect:
+      - { type: ok, name: oracle_reread_ok }
+      # Oracle only: parent 0 split into two children => one net new range.
+      - { type: item_count, name: five_ranges_after, value: 5 }
+
+  - id: read_after_split
+    action: query_drain
+    params:
+      query: "SELECT * FROM c"
+      max_item_count: 20
+    expect:
+      # SUT: the SDK refreshed its routing map after the split and still returns
+      # the full set across the new 5-range topology, with no duplicates.
+      - { type: ok, name: sdk_reads_after_split_ok }
+      - { type: pages_cover_set, name: sdk_covers_40_no_dupes, expected_count: 40 }
+
+  - id: point_read
+    action: read_item
+    params: { id: "cust-7", partition_key: "cust-7" }
+    expect:
+      # SUT: single-key point read routes to the child range that now owns cust-7.
+      - { type: ok, name: point_read_routes_to_child }
+      - { type: field_equals, name: point_read_value, path: item.customerId, value: "cust-7" }
+
+  - id: write_after_split
+    action: upsert_item
+    params:
+      item: { id: "cust-7", customerId: "cust-7", v: "2" }
+    expect:
+      # SUT: write routes to the child range and succeeds.
+      - { type: ok, name: write_routes_to_child }

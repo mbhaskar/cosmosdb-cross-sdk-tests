@@ -13,6 +13,12 @@ public class OpResult {
     public java.util.List<Object> items;
     public double ru;
     public String diagnostics;
+    /** Response headers of the last request (lower-cased keys), for diagnostic_present. */
+    public Map<String, String> diagnosticHeaders;
+    /** Server-minted continuation token after a paged drain (CAP-6). */
+    public String continuation;
+    /** Number of pages fetched by a paged drain (CAP-6). */
+    public int pageCount;
 
     public static OpResult ok(int status, Map<String, Object> item) {
         OpResult r = new OpResult();
@@ -42,6 +48,8 @@ public class OpResult {
         m.put("item", item == null ? new LinkedHashMap<>() : item);
         m.put("items", items == null ? new java.util.ArrayList<>() : items);
         m.put("id", item == null ? null : item.get("id"));
+        m.put("continuation", continuation);
+        m.put("page_count", pageCount);
         return m;
     }
 }
