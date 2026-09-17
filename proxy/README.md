@@ -146,7 +146,7 @@ Registered faults (`fault_engine.FAULTS`):
 | name | status | x-ms-substatus | retry-after | SDK reaction |
 | --- | --- | --- | --- | --- |
 | `throttle_429` | 429 | 3200 | yes | back off, retry after delay |
-| `gone_410` | 410 | 1002 (PKRangeGone) | no | refresh routing cache, retry |
+| `gone_410` | 410 | 1002 (PKRangeGone) | no | gateway point reads surface it; real split rerouting is covered by C-310 |
 | `namecache_410` | 410 | 1000 (NameCacheStale) | no | refresh collection cache, retry |
 | `retrywith_449` | 449 | 0 | no | immediate retry |
 | `unavailable_503` | 503 | 0 | yes | retry another replica |

@@ -1,24 +1,22 @@
 id: "T-308"
 phase: 6
 section: "6.8"
-title: "PartitionKeyRangeGone (410/1002): SDK refreshes routing cache and recovers"
+title: "Synthetic PartitionKeyRangeGone (410/1002) surfaces without wedging the client"
 description: |
-  A count-scoped 410 Gone storm (substatus 1002 = PartitionKeyRangeGone) is
-  injected at the HTTP layer by the mitmproxy addon
+  A single 410 Gone response (substatus 1002 = PartitionKeyRangeGone) is
+  injected at the HTTP gateway layer by the mitmproxy addon
   (proxy/mitm/fault_addon.py, via the pluggable fault_engine registry).
 
   410 is *not* a parameterized 429: it carries a different substatus, no
-  x-ms-retry-after-ms hint, and a different body. On PartitionKeyRangeGone the
-  SDK is expected to invalidate and refresh its partition-key-range / routing
-  cache and transparently retry, rather than surfacing the error. We arm the
-  fault for the first 2 requests only (count-based) so a single read is answered
-  with 410 twice, the SDK refreshes and retries, and the 3rd attempt hits the
-  real backend and succeeds -- exercising the genuine Gone-handling path end to
-  end.
+  x-ms-retry-after-ms hint, and a different body. Both tested SDKs surface a
+  synthetic gateway point-read 410 to the caller rather than transparently
+  rerouting it. The scenario therefore verifies the real observed contract: the
+  410/1002 is preserved, clearing the fault leaves the client usable, and the
+  next read succeeds without recreating the client.
 
-  This is the Layer-7 sibling of the 429 window scenario (T-307): both prove the
-  SDK survives a real protocol fault on the wire, but 410 exercises a distinct
-  retry branch (cache refresh) that 429 (backoff) does not.
+  Transparent routing-cache refresh after an actual partition split is covered
+  separately by C-310 against the stateful in-memory emulator. A protocol proxy
+  cannot reproduce the server topology transition that drives that SDK path.
 
   Layer-7 protocol fault: requires the emulator + mitmproxy stack
   (proxy/docker-compose.proxy.yaml, SDK endpoint -> :18091). Not runnable on the
@@ -40,7 +38,7 @@ fixture:
 timeline:
   - after: seed
     event: inject_fault
-    args: { fault: gone_410, count: 2 }
+    args: { fault: gone_410, count: 1 }
   - after: read_through_gone
     event: fault_clear
 
@@ -54,13 +52,11 @@ steps:
     action: read_item
     params: { id: "o1", partition_key: "cust-1" }
     expect:
-      # The SDK saw 410/1002, refreshed its routing cache, and retried.
-      - { type: retry_count_gte, name: refreshed_and_retried, value: 1 }
-      - { type: eventually_ok, name: recovers_after_gone }
-      - { type: field_equals, name: right_item, path: item.id, value: "o1" }
+      - { type: error_status, name: gone_is_preserved, value: 410 }
 
   - id: read_after_clear
     action: read_item
     params: { id: "o1", partition_key: "cust-1" }
     expect:
-      - { type: ok, name: steady_state_ok }
+      - { type: ok, name: client_recovers_after_clear }
+      - { type: field_equals, name: right_item, path: item.id, value: "o1" }

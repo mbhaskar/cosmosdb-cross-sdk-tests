@@ -33,20 +33,30 @@ else
   DC=(docker-compose)
 fi
 
+wait_for_url() {
+  local label="$1" url="$2" attempts="${3:-60}"
+  for i in $(seq 1 "$attempts"); do
+    if curl -kfsS "$url" >/dev/null 2>&1; then
+      echo "    ${label} ready"
+      return 0
+    fi
+    sleep 3
+  done
+  echo "ERROR: ${label} did not become ready at ${url}" >&2
+  "${DC[@]}" -f "$COMPOSE" ps >&2 || true
+  "${DC[@]}" -f "$COMPOSE" logs --tail=100 >&2 || true
+  return 1
+}
+
 case "$CMD" in
   up)
     echo "==> Starting fault-injection stack (emulator + toxiproxy + mitmproxy)"
     "${DC[@]}" -f "$COMPOSE" up -d
     echo
-    echo "==> Waiting for the Cosmos emulator to report ready (vNext boots in ~20-40s)..."
-    for i in $(seq 1 60); do
-      state="$(docker inspect -f '{{.State.Health.Status}}' cosmos-emulator 2>/dev/null || echo unknown)"
-      if [ "$state" = "healthy" ]; then echo "    emulator healthy"; break; fi
-      # Belt-and-suspenders: also probe the readiness endpoint from the host.
-      if curl -sf http://localhost:8080/ready >/dev/null 2>&1; then echo "    emulator ready"; break; fi
-      sleep 3
-      if [ "$i" = "60" ]; then echo "    WARN: emulator not ready yet; check 'run-fault-stack.sh logs'"; fi
-    done
+    echo "==> Waiting for emulator + fault proxies..."
+    wait_for_url "Cosmos emulator" "http://localhost:8080/ready"
+    wait_for_url "Toxiproxy" "http://localhost:8474/proxies"
+    wait_for_url "mitmproxy" "https://localhost:18091/__fault/status"
     echo
     echo "==> Endpoints"
     echo "    SDK (L7+L4 chain):  https://localhost:18091   (mitmproxy)"
@@ -70,6 +80,10 @@ case "$CMD" in
     echo "-- Toxiproxy proxies --"
     curl -sf http://localhost:8474/proxies 2>/dev/null | python3 -m json.tool 2>/dev/null \
       || echo "   (Toxiproxy admin not reachable; is the stack up?)"
+    echo
+    echo "-- mitmproxy fault engine --"
+    curl -ksf https://localhost:18091/__fault/status 2>/dev/null \
+      || echo "   (mitmproxy control endpoint not reachable; is the stack up?)"
     ;;
   logs)
     "${DC[@]}" -f "$COMPOSE" logs -f --tail=100

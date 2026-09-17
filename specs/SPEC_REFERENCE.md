@@ -198,7 +198,7 @@ Scope a mitm fault with **either** `seconds=N` (time window) **or** `count=N`
 | `fault` name | status | x-ms-substatus | retry-after | SDK reaction |
 |---|---|---|---|---|
 | `throttle_429` | 429 | 3200 | yes | back off, retry after delay |
-| `gone_410` | 410 | 1002 (PKRangeGone) | no | refresh routing cache, retry |
+| `gone_410` | 410 | 1002 (PKRangeGone) | no | gateway point-read handling is SDK-specific; T-308 verifies recovery after clear |
 | `namecache_410` | 410 | 1000 (NameCacheStale) | no | refresh collection cache, retry |
 | `retrywith_449` | 449 | 0 | no | immediate retry |
 | `unavailable_503` | 503 | 0 | yes | retry another replica |

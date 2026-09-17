@@ -241,7 +241,7 @@ python scripts/compare.py results/ -o report.md --fail-on-divergence
 | Workflow | Trigger | Backend | Notes |
 | --- | --- | --- | --- |
 | `.github/workflows/ci.yml` | push / PR (auto) + manual | `mock` (default), `live` | The PR gate. Auto-runs **both** SDKs + divergence gate. |
-| `.github/workflows/nightly-emulator.yml` | nightly cron + manual | `emulator` | Spins up the Cosmos Linux emulator service container. |
+| `.github/workflows/nightly-emulator.yml` | nightly cron + manual | `emulator` | Starts the complete Docker stack (Cosmos Linux emulator + Toxiproxy + mitmproxy), builds the Java trust store, and runs ordinary plus fault-injection scenarios. |
 | `.github/workflows/sdk-from-source.yml` | manual | `emulator` / `live` | Builds the Cosmos SDK from a chosen **branch/ref** of an Azure SDK monorepo, then runs the matrix with `--source local`. |
 
 **Manual runs are parameterized** (Actions → Run workflow):

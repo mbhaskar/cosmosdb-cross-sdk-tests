@@ -52,19 +52,24 @@ def load_from_db(db_path: str, run_id: str) -> List[Dict[str, Any]]:
 def find_divergences(results: List[Dict[str, Any]]) -> List[str]:
     """Scenario ids where the participating SDKs disagree on status.
 
-    A divergence requires at least two SDKs to have produced a (non-missing)
-    result for the scenario, and for those statuses to differ.
+    ``skip`` means that an SDK did not participate (for example, a scenario
+    explicitly gated to Python), so it must not be compared with a real result.
+    A divergence requires at least two non-skipped SDK results for the scenario,
+    and for those statuses to differ.
     """
-    sdks = sorted({f"{r['sdk']} {r.get('sdk_version','')}".strip() for r in results})
     by_scenario: Dict[str, Dict[str, Dict]] = defaultdict(dict)
     for r in results:
         sdk = f"{r['sdk']} {r.get('sdk_version','')}".strip()
         by_scenario[r["scenario_id"]][sdk] = r
 
     divergent = []
-    for scid in by_scenario:
-        statuses = {by_scenario[scid][s]["status"] for s in sdks if s in by_scenario[scid]}
-        if len(statuses) > 1:
+    for scid, sdk_results in by_scenario.items():
+        participating = [
+            result for result in sdk_results.values()
+            if result.get("status") != "skip"
+        ]
+        statuses = {result.get("status") for result in participating}
+        if len(participating) >= 2 and len(statuses) > 1:
             divergent.append(scid)
     return sorted(divergent, key=lambda x: (0, int(x)) if x.isdigit() else (1, x))
 

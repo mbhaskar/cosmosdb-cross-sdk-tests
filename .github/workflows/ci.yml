@@ -57,6 +57,9 @@ jobs:
             pip install -r harness/python/requirements.txt
           fi
 
+      - name: Run comparison unit tests
+        run: python -m unittest discover -s tests -p "test_*.py"
+
       # Java toolchain + jar are only needed when the Java runner participates.
       - name: Set up Java
         if: ${{ env.LANGUAGES != 'python' }}

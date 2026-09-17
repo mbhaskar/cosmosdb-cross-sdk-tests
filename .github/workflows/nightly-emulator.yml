@@ -1,9 +1,9 @@
 name: Nightly (emulator)
 
 # Runs the full matrix against the Linux Cosmos DB emulator on a schedule, plus
-# on-demand. The emulator runs as a service container; because service
-# containers start before the job regardless of inputs, the emulator tier lives
-# in its own workflow rather than as a `backend` option on the fast mock gate.
+# on-demand. It starts the complete Docker fault stack (emulator + Toxiproxy +
+# mitmproxy) so ordinary emulator scenarios and proxy-dependent C-220/T-3xx
+# scenarios are exercised in the same integration run.
 on:
   schedule:
     - cron: "0 7 * * *" # 07:00 UTC daily
@@ -25,16 +25,6 @@ jobs:
     env:
       LANGUAGES: ${{ github.event.inputs.languages || 'both' }}
       DIVERGENCE: ${{ github.event.inputs.divergence_check || 'true' }}
-    services:
-      cosmos:
-        # vNext Linux emulator: multi-arch, gateway-mode only. HTTP by default, so
-        # force HTTPS via the PROTOCOL env var to match the SDKs' requirements.
-        image: mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:vnext-latest
-        ports:
-          - 8081:8081     # gateway (HTTPS)
-          - 8080:8080     # health probe (/ready) — HTTP
-        env:
-          PROTOCOL: https
     steps:
       - uses: actions/checkout@v4
 
@@ -62,38 +52,22 @@ jobs:
         if: ${{ env.LANGUAGES != 'python' }}
         run: cd harness/java && mvn -q -DskipTests package
 
-      # vNext exposes a health probe on :8080. Poll it for readiness, then export
-      # the emulator's self-signed cert (via openssl, since vNext has no
-      # /_explorer/emulator.pem endpoint) and trust it for the Java SDK. The Python
-      # SDK skips verification for the emulator automatically.
-      - name: Wait for emulator + trust certificate
+      # C-220 and T-301..T-308 require the complete proxy chain, not only the
+      # emulator. The helper waits until emulator, Toxiproxy, and mitmproxy are
+      # all reachable and fails with stack logs if any component cannot start.
+      - name: Start emulator + fault proxies
+        run: scripts/run-fault-stack.sh up
+
+      - name: Build Java trust store
+        if: ${{ env.LANGUAGES != 'python' }}
         run: |
-          set -e
-          echo "Waiting for emulator readiness probe..."
-          for i in $(seq 1 60); do
-            if curl -sf http://localhost:8080/ready >/dev/null 2>&1; then
-              echo "Emulator is ready."
-              break
-            fi
-            sleep 3
-          done
-          curl -sf http://localhost:8080/ready >/dev/null 2>&1 || { echo "Emulator never became ready"; exit 1; }
-          # Export the gateway's TLS cert and trust it for the JVM + OS store.
-          openssl s_client -connect localhost:8081 -servername localhost </dev/null 2>/dev/null \
-            | openssl x509 -outform PEM > /tmp/cosmos.crt
-          test -s /tmp/cosmos.crt || { echo "Could not extract emulator cert"; exit 1; }
-          sudo cp /tmp/cosmos.crt /usr/local/share/ca-certificates/cosmos.crt
-          sudo update-ca-certificates
-          KEYTOOL="$JAVA_HOME/bin/keytool"
-          sudo "$KEYTOOL" -importcert -noprompt -trustcacerts -alias cosmos-emulator \
-            -file /tmp/cosmos.crt -keystore "$JAVA_HOME/lib/security/cacerts" \
-            -storepass changeit || true
+          scripts/build-java-truststore.sh
+          "$JAVA_HOME/bin/keytool" -list \
+            -keystore build/java-cosmos-truststore.jks \
+            -storepass changeit \
+            -alias mitmproxy-ca >/dev/null
 
       - name: Run scenario matrix (emulator)
-        env:
-          # Well-known public emulator endpoint + key (also in config/default.yaml).
-          REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
-          SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
         run: |
           python scripts/run-matrix.py \
             --backend emulator \
@@ -101,14 +75,14 @@ jobs:
             --out results/
 
       - name: Compare SDKs (divergence gate)
-        if: ${{ env.LANGUAGES == 'both' }}
+        if: ${{ always() && env.LANGUAGES == 'both' }}
         run: |
           FLAG=""
           if [ "$DIVERGENCE" = "true" ]; then FLAG="--fail-on-divergence"; fi
           python scripts/compare.py results/ -o report.md $FLAG
 
       - name: Single-SDK report
-        if: ${{ env.LANGUAGES != 'both' }}
+        if: ${{ always() && env.LANGUAGES != 'both' }}
         run: python scripts/compare.py results/ -o report.md
 
       - name: Upload results + report
@@ -120,3 +94,7 @@ jobs:
             results/
             report.md
           if-no-files-found: warn
+
+      - name: Stop emulator + fault proxies
+        if: ${{ always() }}
+        run: scripts/run-fault-stack.sh down
